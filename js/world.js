@@ -1,306 +1,250 @@
 'use strict';
 // ---------------------------------------------------------------------------
-// World: block storage, water flow, plant growth, timed blocks and lighting.
+// Voxel world: 16x16 chunk columns, block access, water flow, plant growth,
+// timed blocks (crumbling tiles, boom blocks) and animated building jobs.
+// Coordinates: x/z horizontal, y up. Blocks at y < height(x,z) are ground.
 // ---------------------------------------------------------------------------
 
-const WORLD_W = 3200;
-const WORLD_H = 192;
-const SEA_LEVEL = 100;
-const WATER_MAX = 8;
+const CS = 16;   // chunk size (x and z)
+const CH = 96;   // chunk height
+const SEA = 32;  // sea level
+const CK = (cx, cz) => (cx + 32768) * 65536 + (cz + 32768);
+const cidx = (x, y, z) => (y * CS + z) * CS + x;
+
+// lookup tables filled after blocks are defined
+let OPAQUE, SOLIDT, LIGHT, LEAVESET;
+function buildTables() {
+  OPAQUE = new Uint8Array(256); SOLIDT = new Uint8Array(256); LIGHT = new Uint8Array(256); LEAVESET = new Uint8Array(256);
+  for (const d of BLOCKS) {
+    OPAQUE[d.id] = d.opaque && d.shape === 'cube' ? 1 : 0;
+    SOLIDT[d.id] = d.solid ? 1 : 0;
+    LIGHT[d.id] = d.light || 0;
+    LEAVESET[d.id] = d.leaves ? 1 : 0;
+  }
+}
+
+class Chunk {
+  constructor(cx, cz) {
+    this.cx = cx; this.cz = cz;
+    this.blocks = new Uint8Array(CS * CS * CH);
+    this.meta = new Uint8Array(CS * CS * CH);
+    this.lights = new Set();
+    this.growers = new Map(); // index -> seconds until next growth
+    this.mesh = null;
+    this.modified = false;
+  }
+  scan() {
+    this.lights.clear(); this.growers.clear();
+    const b = this.blocks;
+    for (let i = 0; i < b.length; i++) {
+      const id = b[i];
+      if (!id) continue;
+      if (LIGHT[id]) this.lights.add(i);
+      const d = BLOCKS[id];
+      if (d.grow && !(d.stages && this.meta[i] >= d.stages.length - 1)) this.growers.set(i, d.grow.time * (0.6 + Math.random() * 0.8));
+    }
+  }
+}
 
 class World {
-  constructor(seedStr, W = WORLD_W, H = WORLD_H) {
+  constructor(seedStr, mode, gen) {
     this.seedStr = String(seedStr);
     this.seed = hashString(this.seedStr);
-    this.W = W; this.H = H;
-    this.fg = new Uint8Array(W * H);
-    this.bg = new Uint8Array(W * H);
-    this.meta = new Uint8Array(W * H);
-    this.biome = new Uint8Array(W);
-    this.terrainY = new Int16Array(W); // generated ground height, used for sky light
-    this.zones = [];
-    this.courses = [];
-    this.emitters = [];
-    this.npcSpawns = [];
-    this.roads = [];
-    this.spawn = { x: W / 2, y: 60 };
-    this.waterActive = new Set();
-    this.springs = new Set();
-    this.sponges = new Set();
-    this.growing = new Map();
-    this.timers = new Map();
+    this.mode = mode;
+    this.gen = gen;               // terrain generator (null for parkour arenas)
+    this.chunks = new Map();
+    this.saved = new Map();       // chunk key -> saved arrays (applied when generated)
+    this.dirty = new Set();       // chunk keys needing a new mesh
+    this.urgent = new Set();      // remesh these first
+    this.waterQ = new Set();
+    this.timers = new Map();      // "x,y,z" -> {kind, t, ...}
     this.jobs = [];
-    this.pops = new Map();
     this.events = [];
     this.clock = 0;
-    this.dirty = true;
-    this.waterFlip = false;
-    this.focusX = W / 2;
+  }
+  getChunk(cx, cz) { return this.chunks.get(CK(cx, cz)); }
+  ensureChunk(cx, cz) {
+    const k = CK(cx, cz);
+    let c = this.chunks.get(k);
+    if (c) return c;
+    c = new Chunk(cx, cz);
+    if (this.gen) this.gen.fill(c);
+    const sv = this.saved.get(k);
+    if (sv) { c.blocks.set(sv.b); c.meta.set(sv.m); c.modified = true; }
+    c.scan();
+    this.chunks.set(k, c);
+    this.dirty.add(k);
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const nk = CK(cx + dx, cz + dz); if (this.chunks.has(nk)) this.dirty.add(nk); }
+    return c;
+  }
+  unload(cx, cz) {
+    const k = CK(cx, cz), c = this.chunks.get(k);
+    if (!c) return null;
+    if (c.modified) this.saved.set(k, { b: c.blocks.slice(), m: c.meta.slice() });
+    this.chunks.delete(k); this.dirty.delete(k); this.urgent.delete(k);
+    return c;
   }
 
-  idx(x, y) { return y * this.W + x; }
-  inb(x, y) { return x >= 0 && y >= 0 && x < this.W && y < this.H; }
-  get(x, y) {
-    if (y < 0) return B.air;
-    if (x < 0 || x >= this.W || y >= this.H) return B.bedrock;
-    return this.fg[y * this.W + x];
+  get(x, y, z) {
+    if (y < 0) return B.bedrock;
+    if (y >= CH) return 0;
+    const c = this.chunks.get(CK(x >> 4, z >> 4));
+    return c ? c.blocks[cidx(x & 15, y, z & 15)] : 0;
   }
-  def(x, y) { return BLOCKS[this.get(x, y)]; }
-  getMeta(x, y) { return this.inb(x, y) ? this.meta[y * this.W + x] : 0; }
-  getBg(x, y) { return this.inb(x, y) ? this.bg[y * this.W + x] : 0; }
-  setRaw(x, y, id, m = 0) {
-    if (!this.inb(x, y)) return;
-    const i = y * this.W + x;
-    this.fg[i] = id; this.meta[i] = m;
+  getMeta(x, y, z) {
+    if (y < 0 || y >= CH) return 0;
+    const c = this.chunks.get(CK(x >> 4, z >> 4));
+    return c ? c.meta[cidx(x & 15, y, z & 15)] : 0;
   }
-  setBgRaw(x, y, id) { if (this.inb(x, y)) this.bg[y * this.W + x] = id; }
-
-  // Surface row (first solid block from the top) at column x.
-  surfaceY(x) {
-    x = clamp(Math.floor(x), 0, this.W - 1);
-    for (let y = 0; y < this.H; y++) {
-      const d = BLOCKS[this.fg[y * this.W + x]];
-      if (d.solid || d.liquid) return y;
-    }
-    return this.H - 1;
+  isLoaded(x, z) { return this.chunks.has(CK(x >> 4, z >> 4)); }
+  solidAt(x, y, z) {
+    const id = this.get(x, y, z);
+    if (SOLIDT[id]) return true;
+    if (id === B.door || id === B.door_top) return !(this.getMeta(x, y, z) & 4);
+    return false;
+  }
+  // highest block that is not air (for spawning and the camera)
+  topY(x, z) {
+    for (let y = CH - 1; y > 0; y--) { const id = this.get(x, y, z); if (id && id !== B.water && SOLIDT[id] && !LEAVESET[id]) return y; }
+    return 0;
   }
 
-  // Set a block with all game side effects (water wakes, plant support, ...)
-  set(x, y, id, m = 0, opts = {}) {
-    if (!this.inb(x, y)) return false;
-    const W = this.W, i = y * W + x;
-    const old = this.fg[i];
-    if (old === id && this.meta[i] === m) return false;
-    const od = BLOCKS[old], nd = BLOCKS[id];
-    this.fg[i] = id; this.meta[i] = m;
-
-    if (od.spring) this.springs.delete(i);
-    if (nd.spring) this.springs.add(i);
-    if (od.sponge) this.sponges.delete(i);
-    if (nd.sponge) { this.sponges.add(i); this.absorb(x, y, 4); }
-    if (od.plant) this.growing.delete(i);
-    if (nd.plant && plantGrows(nd, m)) this.growing.set(i, growTime(nd));
-    if (this.timers.has(i) && !opts.keepTimer) this.timers.delete(i);
-
-    // Doors are two blocks tall: removing one half removes the other.
-    if (od.door === 'bottom' && id !== B.door && this.get(x, y - 1) === B.door_top) this.setRaw(x, y - 1, B.air);
-    if (od.door === 'top' && id !== B.door_top && this.get(x, y + 1) === B.door) this.setRaw(x, y + 1, B.air);
-
-    this.wakeAround(i);
-
-    // plant above loses its soil
-    if (y > 0) {
-      const ai = i - W, aid = this.fg[ai], ad = BLOCKS[aid];
-      if (ad.plant && !plantSupported(aid, id)) {
-        this.set(x, y - 1, B.air);
-        this.events.push({ type: 'break', x, y: y - 1, id: aid });
-      } else if (ad.fall && !nd.solid) {
-        this.setRaw(x, y - 1, B.air);
-        this.wakeAround(ai);
-        this.events.push({ type: 'fall', x, y: y - 1, id: aid });
+  markDirty(x, y, z, light) {
+    const cx = x >> 4, cz = z >> 4, lx = x & 15, lz = z & 15;
+    this.urgent.add(CK(cx, cz));
+    const r = light ? 15 : 1;
+    for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+      if (!dx && !dz) continue;
+      const nearX = dx < 0 ? lx < r : dx > 0 ? lx > 15 - r : true;
+      const nearZ = dz < 0 ? lz < r : dz > 0 ? lz > 15 - r : true;
+      if (nearX && nearZ) {
+        const k = CK(cx + dx, cz + dz);
+        if (this.chunks.has(k)) (light ? this.dirty : this.urgent).add(k);
       }
     }
-    // grass smothered by a solid block turns into dirt
-    if (nd.opaque && nd.solid && y + 1 < this.H && this.fg[i + W] === B.grass) this.fg[i + W] = B.dirt;
+  }
 
-    if (!opts.silent && id !== B.air) this.pops.set(i, performance.now());
-    this.dirty = true;
+  set(x, y, z, id, meta = 0, opts = {}) {
+    if (y < 0 || y >= CH) return false;
+    const c = this.chunks.get(CK(x >> 4, z >> 4));
+    if (!c) return false;
+    const i = cidx(x & 15, y, z & 15);
+    const old = c.blocks[i];
+    if (old === id && c.meta[i] === meta) return false;
+    c.blocks[i] = id; c.meta[i] = meta; c.modified = true;
+    if (LIGHT[old]) c.lights.delete(i);
+    if (LIGHT[id]) c.lights.add(i);
+    c.growers.delete(i);
+    const nd = BLOCKS[id];
+    if (nd.grow && !(nd.stages && meta >= nd.stages.length - 1)) c.growers.set(i, nd.grow.time * (0.7 + Math.random() * 0.6));
+    const lightChange = LIGHT[old] !== LIGHT[id] || OPAQUE[old] !== OPAQUE[id];
+    this.markDirty(x, y, z, lightChange);
+    this.wakeWater(x, y, z);
+    if (!opts.quiet) this.events.push({ type: 'set', x, y, z, id, old });
+    // plants and doors lose their support
+    const above = this.get(x, y + 1, z), ad = BLOCKS[above];
+    if (!SOLIDT[id] && (ad.plant || ad.torch || above === B.door) && !opts.keepAbove) {
+      this.set(x, y + 1, z, 0);
+      this.events.push({ type: 'pop', x, y: y + 1, z, id: above });
+    }
+    if (old === B.door && id !== B.door && this.get(x, y + 1, z) === B.door_top) this.set(x, y + 1, z, 0, 0, { quiet: true });
+    if (old === B.door_top && id !== B.door_top && this.get(x, y - 1, z) === B.door) this.set(x, y - 1, z, 0, 0, { quiet: true });
+    if (nd.sponge) this.absorb(x, y, z, 4);
     return true;
   }
 
-  setBg(x, y, id) {
-    if (!this.inb(x, y)) return false;
-    const i = y * this.W + x;
-    if (this.bg[i] === id) return false;
-    this.bg[i] = id; this.dirty = true;
-    return true;
-  }
-
-  // --- water -----------------------------------------------------------------
-  wake(i) {
-    if (i >= 0 && i < this.fg.length && this.fg[i] === B.water) this.waterActive.add(i);
-  }
-  wakeAround(i) {
-    const W = this.W;
-    this.wake(i); this.wake(i - 1); this.wake(i + 1); this.wake(i - W); this.wake(i + W);
-  }
-  absorb(cx, cy, r) {
-    for (let y = cy - r; y <= cy + r; y++) for (let x = cx - r; x <= cx + r; x++) {
-      if (!this.inb(x, y) || (x - cx) ** 2 + (y - cy) ** 2 > r * r + 1) continue;
-      const i = this.idx(x, y);
-      if (this.fg[i] === B.water) { this.fg[i] = B.air; this.meta[i] = 0; this.wakeAround(i); }
+  // --- water ---------------------------------------------------------------------
+  // meta for water: 0 = source, 1..7 = flowing (bigger = further from source)
+  wakeWater(x, y, z) {
+    for (const [dx, dy, dz] of [[0, 0, 0], [1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) {
+      if (this.get(x + dx, y + dy, z + dz) === B.water) this.waterQ.add(`${x + dx},${y + dy},${z + dz}`);
     }
-    this.dirty = true;
   }
-  addWater(x, y, amount = WATER_MAX) {
-    if (!this.inb(x, y)) return false;
-    const i = this.idx(x, y);
-    const id = this.fg[i];
-    if (id === B.air || BLOCKS[id].replaceable) { this.fg[i] = B.water; this.meta[i] = amount; }
-    else if (id === B.water) this.meta[i] = Math.min(WATER_MAX, this.meta[i] + amount);
-    else return false;
-    this.wakeAround(i);
-    this.dirty = true;
-    return true;
+  canFlowInto(x, y, z) {
+    const id = this.get(x, y, z);
+    return id === 0 || (BLOCKS[id].replaceable && id !== B.water) || (BLOCKS[id].plant && !BLOCKS[id].solid);
   }
-
-  waterStep() {
-    const W = this.W, fg = this.fg, meta = this.meta, WATER = B.water, AIR = B.air;
-    for (const i of this.springs) {
-      if (Math.abs((i % W) - this.focusX) > 180) continue;
-      for (const n of [i - 1, i + 1, i + W, i - W]) {
-        if (n < 0 || n >= fg.length) continue;
-        if (n === i - W && fg[n] !== WATER && fg[n] !== AIR) continue;
-        if (fg[n] === AIR && n !== i - W) { fg[n] = WATER; meta[n] = WATER_MAX; this.wakeAround(n); }
-        else if (fg[n] === WATER && meta[n] < WATER_MAX) { meta[n] = WATER_MAX; this.wakeAround(n); }
+  waterStep(maxN = 400) {
+    if (!this.waterQ.size) return;
+    const list = [...this.waterQ].slice(0, maxN);
+    for (const k of list) this.waterQ.delete(k);
+    for (const k of list) {
+      const [x, y, z] = k.split(',').map(Number);
+      if (this.get(x, y, z) !== B.water || !this.isLoaded(x, z)) continue;
+      const lvl = this.getMeta(x, y, z);
+      if (lvl > 0) {
+        // flowing water needs a feeder: water above, or a neighbour closer to the source
+        let fed = this.get(x, y + 1, z) === B.water;
+        let sources = 0;
+        for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          if (this.get(x + dx, y, z + dz) !== B.water) continue;
+          const nl = this.getMeta(x + dx, y, z + dz);
+          if (nl < lvl) fed = true;
+          if (nl === 0) sources++;
+        }
+        if (!fed) { this.set(x, y, z, 0, 0, { quiet: true }); continue; }
+        if (sources >= 2 && (SOLIDT[this.get(x, y - 1, z)] || this.get(x, y - 1, z) === B.water)) { this.set(x, y, z, B.water, 0, { quiet: true }); continue; }
+      }
+      if (this.canFlowInto(x, y - 1, z)) { this.set(x, y - 1, z, B.water, 1, { quiet: true }); continue; }
+      if (this.get(x, y - 1, z) === B.water) continue;
+      if (lvl >= 7) continue;
+      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const nx = x + dx, nz = z + dz;
+        if (this.canFlowInto(nx, y, nz)) this.set(nx, y, nz, B.water, lvl + 1, { quiet: true });
+        else if (this.get(nx, y, nz) === B.water && this.getMeta(nx, y, nz) > lvl + 1) this.set(nx, y, nz, B.water, lvl + 1, { quiet: true });
       }
     }
-    for (const i of this.sponges) {
-      for (const n of [i - 1, i + 1, i + W, i - W]) {
-        if (n >= 0 && n < fg.length && fg[n] === WATER) { fg[n] = AIR; meta[n] = 0; this.wakeAround(n); }
-      }
+  }
+  absorb(cx, cy, cz, r) {
+    for (let y = cy - r; y <= cy + r; y++) for (let z = cz - r; z <= cz + r; z++) for (let x = cx - r; x <= cx + r; x++) {
+      if (this.get(x, y, z) === B.water) this.set(x, y, z, 0, 0, { quiet: true });
     }
-    if (!this.waterActive.size) return;
-    let list = Array.from(this.waterActive);
-    this.waterActive.clear();
-    if (list.length > 5000) {
-      // keep the simulation responsive: process the cells nearest the player
-      list.sort((a, b) => Math.abs((a % W) - this.focusX) - Math.abs((b % W) - this.focusX));
-      for (let k = 5000; k < list.length; k++) this.waterActive.add(list[k]);
-      list = list.slice(0, 5000);
-    }
-    list.sort((a, b) => b - a); // bottom rows first so falling water looks smooth
-    this.waterFlip = !this.waterFlip;
-    for (const i of list) this.flowCell(i);
-    this.dirty = true;
   }
 
-  flowCell(i) {
-    const W = this.W, H = this.H, fg = this.fg, meta = this.meta, WATER = B.water, AIR = B.air;
-    if (fg[i] !== WATER) return;
-    let a = meta[i];
-    if (a <= 0) { fg[i] = AIR; this.wakeAround(i); return; }
-    const x = i % W, y = (i / W) | 0;
-    if (y + 1 < H) {
-      const b = i + W, bid = fg[b];
-      if (bid === AIR) {
-        fg[b] = WATER; meta[b] = a; fg[i] = AIR; meta[i] = 0;
-        this.wakeAround(i); this.wakeAround(b);
-        return;
-      }
-      if (bid === WATER && meta[b] < WATER_MAX) {
-        const t = Math.min(a, WATER_MAX - meta[b]);
-        meta[b] += t; a -= t; meta[i] = a;
-        this.wakeAround(b); this.wakeAround(i);
-        if (a === 0) { fg[i] = AIR; return; }
-      }
-    }
-    const L = x > 0 ? i - 1 : -1, R = x < W - 1 ? i + 1 : -1;
-    const lOk = L >= 0 && (fg[L] === AIR || fg[L] === WATER);
-    const rOk = R >= 0 && (fg[R] === AIR || fg[R] === WATER);
-    if (!lOk && !rOk) return;
-    const la = lOk && fg[L] === WATER ? meta[L] : 0;
-    const ra = rOk && fg[R] === WATER ? meta[R] : 0;
-    let hi = a, lo = a;
-    if (lOk) { hi = Math.max(hi, la); lo = Math.min(lo, la); }
-    if (rOk) { hi = Math.max(hi, ra); lo = Math.min(lo, ra); }
-    if (hi - lo < 2) return;
-    const cells = 1 + (lOk ? 1 : 0) + (rOk ? 1 : 0);
-    const total = a + la + ra;
-    const avg = Math.floor(total / cells);
-    let rem = total - avg * cells;
-    let na = avg, nl = avg, nr = avg;
-    if (rem > 0) { na++; rem--; }
-    if (rem > 0) {
-      if (lOk && rOk) { if (this.waterFlip) nl++; else nr++; }
-      else if (lOk) nl++; else nr++;
-    }
-    meta[i] = na; if (na === 0) fg[i] = AIR;
-    if (lOk) { if (nl > 0) { fg[L] = WATER; meta[L] = nl; } else { fg[L] = AIR; meta[L] = 0; } this.wakeAround(L); }
-    if (rOk) { if (nr > 0) { fg[R] = WATER; meta[R] = nr; } else { fg[R] = AIR; meta[R] = 0; } this.wakeAround(R); }
-    this.wakeAround(i);
-  }
-
-  // --- growth -----------------------------------------------------------------
+  // --- growth ------------------------------------------------------------------------
   growStep(dt, env) {
-    for (const [i, t] of this.growing) {
-      const x = i % this.W, y = (i / this.W) | 0;
-      let m = env.night ? 0.6 : 1;
-      if (env.rain) m *= 1.35;
-      if (this.fg[i + this.W] === B.farmland) m *= 1.6;
-      if (this.nearWater(x, y)) m *= 1.4;
-      const nt = t - dt * m;
-      if (nt > 0) this.growing.set(i, nt);
-      else this.advancePlant(i);
-    }
-  }
-  nearWater(x, y) {
-    for (let dy = 0; dy <= 2; dy++) for (let dx = -3; dx <= 3; dx++) if (this.get(x + dx, y + dy) === B.water) return true;
-    return false;
-  }
-  advancePlant(i, instant = false) {
-    const id = this.fg[i], d = BLOCKS[id];
-    if (!d.plant) { this.growing.delete(i); return false; }
-    const pl = d.plant, st = this.meta[i];
-    const x = i % this.W, y = (i / this.W) | 0;
-    if (st < pl.stages - 1) {
-      this.meta[i] = st + 1;
-      this.pops.set(i, performance.now());
-      this.events.push({ type: 'grow', x, y, id });
-      if (plantGrows(d, st + 1)) this.growing.set(i, growTime(d) * (instant ? 0.3 : 1));
-      else this.growing.delete(i);
-      this.dirty = true;
-      return true;
-    }
-    this.growing.delete(i);
-    const f = pl.final;
-    if (!f || f === 'stay' || f === 'none') return false;
-    if (f.block) {
-      this.set(x, y, B[f.block]);
-      this.events.push({ type: 'grow', x, y, id });
-      return true;
-    }
-    if (f.stack) {
-      let h = 1;
-      while (this.get(x, y + h) === id) h++;
-      if (h < f.stack && this.get(x, y - 1) === B.air) {
-        this.set(x, y - 1, id);
-        this.events.push({ type: 'grow', x, y: y - 1, id });
-        return true;
+    for (const c of this.chunks.values()) {
+      if (!c.growers.size) continue;
+      for (const [i, t] of c.growers) {
+        const nt = t - dt * (env.rain ? 1.4 : 1) * (env.night ? 0.6 : 1);
+        if (nt > 0) { c.growers.set(i, nt); continue; }
+        c.growers.delete(i);
+        const lx = i & 15, lz = (i >> 4) & 15, y = Math.floor(i / 256);
+        this.grow(c.cx * 16 + lx, y, c.cz * 16 + lz);
       }
-      return false;
     }
-    if (f.tree || f.struct) {
-      const S = new CollectSink(this);
-      const rng = new RNG(hashString(this.seedStr + ':' + i + ':' + Math.floor(this.clock)));
-      let label = null;
-      if (f.tree) buildTree(S, x, y, f.tree, rng);
-      else label = buildGrownStructure(S, x, y, f.struct, rng);
-      this.setRaw(x, y, B.air);
-      this.startJob(S.ops, x, y, f.tree ? 1.4 : 3.2);
-      this.events.push({ type: 'growBig', x, y, id, label });
+  }
+  grow(x, y, z) {
+    const id = this.get(x, y, z), d = BLOCKS[id];
+    if (!d.grow) return false;
+    if (d.stages) {
+      const m = this.getMeta(x, y, z);
+      if (m >= d.stages.length - 1) return false;
+      this.set(x, y, z, id, m + 1, { quiet: true });
+      this.events.push({ type: 'grow', x, y, z, id });
       return true;
     }
-    return false;
+    const rng = new RNG(hashString(`${this.seedStr}:${x},${y},${z}:${Math.floor(this.clock)}`));
+    const S = new CollectSink(this);
+    const label = growStructure(S, x, y, z, d.grow.into, rng);
+    this.set(x, y, z, 0, 0, { quiet: true });
+    this.startJob(S.ops, x, y, z, d.grow.into === 'house' || d.grow.into === 'tower' ? 3 : 1.3);
+    this.events.push({ type: 'growBig', x, y, z, id, label });
+    return true;
   }
-
-  // Animated construction used for trees and grown structures.
-  startJob(ops, ox, oy, duration) {
-    // keep only the last operation per cell, drop no-op clears
+  startJob(ops, ox, oy, oz, duration) {
     const last = new Map();
-    for (const o of ops) last.set((o.layer ? -1 : 1) * (o.y * this.W + o.x + 1), o);
-    ops = [...last.values()].filter(o => this.canBuildOver(o) &&
-      !(o.layer === 0 && o.id === B.air && this.get(o.x, o.y) === B.air));
-    const key = o => (oy - o.y) + Math.abs(o.x - ox) * 0.35 + (o.layer ? 0.2 : 0) - (o.id === B.air ? 0.5 : 0);
+    for (const o of ops) last.set(`${o.x},${o.y},${o.z}`, o);
+    ops = [...last.values()].filter(o => this.canBuildOver(o) && !(o.id === 0 && this.get(o.x, o.y, o.z) === 0));
+    const key = o => (o.y - oy) + Math.hypot(o.x - ox, o.z - oz) * 0.3 - (o.id === 0 ? 0.5 : 0);
     ops.sort((a, b) => key(a) - key(b));
-    this.jobs.push({ ops, k: 0, rate: Math.max(12, ops.length / duration), acc: 0 });
+    this.jobs.push({ ops, k: 0, rate: Math.max(20, ops.length / duration), acc: 0 });
   }
   canBuildOver(o) {
-    if (!this.inb(o.x, o.y)) return false;
-    if (o.layer === 1) return true;
-    const cur = BLOCKS[this.get(o.x, o.y)];
+    if (!this.isLoaded(o.x, o.z)) return false;
+    const cur = BLOCKS[this.get(o.x, o.y, o.z)];
     if (cur.id === B.bedrock) return false;
-    return cur.id === B.air || cur.liquid || cur.plant || cur.cat === 'nature';
+    return cur.id === 0 || cur.liquid || cur.plant || cur.cat === 'nature' || cur.leaves;
   }
   jobStep(dt) {
     for (const job of this.jobs) {
@@ -308,177 +252,68 @@ class World {
       while (job.acc >= 1 && job.k < job.ops.length) {
         job.acc -= 1;
         const o = job.ops[job.k++];
-        if (o.layer === 1) this.setBg(o.x, o.y, o.id);
-        else if (this.canBuildOver(o)) {
-          this.set(o.x, o.y, o.id, o.meta || 0);
-          if (o.id !== B.air) this.events.push({ type: 'place', x: o.x, y: o.y, id: o.id, quiet: job.k % 3 !== 0 });
+        if (this.canBuildOver(o) && this.set(o.x, o.y, o.z, o.id, o.meta || 0, { quiet: true }) && o.id) {
+          if (job.k % 3 === 0) this.events.push({ type: 'build', x: o.x, y: o.y, z: o.z, id: o.id });
         }
       }
     }
     this.jobs = this.jobs.filter(j => j.k < j.ops.length);
   }
 
-  // --- timed blocks (crumbling platforms, boom blocks) ---------------------------
-  triggerCrumble(x, y) {
-    const i = this.idx(x, y);
-    if (this.fg[i] !== B.crumble || this.timers.has(i)) return;
-    this.timers.set(i, { kind: 'shake', t: 0.45 });
+  // --- timed blocks --------------------------------------------------------------------
+  triggerCrumble(x, y, z) {
+    const k = `${x},${y},${z}`;
+    if (this.get(x, y, z) !== B.crumble || this.timers.has(k)) return;
+    this.timers.set(k, { kind: 'shake', t: 0.45, x, y, z });
   }
-  ignite(x, y, fuse = 1.6) {
-    const i = this.idx(x, y);
-    if (this.fg[i] !== B.boom) return;
-    const cur = this.timers.get(i);
-    if (cur && cur.kind === 'boom' && cur.t <= fuse) return;
-    this.timers.set(i, { kind: 'boom', t: fuse, fuse });
-    this.events.push({ type: 'fuse', x, y });
+  ignite(x, y, z) {
+    const k = `${x},${y},${z}`;
+    if (this.get(x, y, z) !== B.boom || this.timers.has(k)) return;
+    this.timers.set(k, { kind: 'boom', t: 1.6, x, y, z });
+    this.events.push({ type: 'fuse', x, y, z });
   }
-  timerStep(dt, isOccupied) {
-    for (const [i, tm] of this.timers) {
+  timerStep(dt, occupied) {
+    for (const [k, tm] of this.timers) {
       tm.t -= dt;
       if (tm.t > 0) continue;
-      const x = i % this.W, y = (i / this.W) | 0;
       if (tm.kind === 'shake') {
-        this.set(x, y, B.air, 0, { silent: true });
-        this.events.push({ type: 'crumble', x, y });
-        this.timers.set(i, { kind: 'restore', t: 3.2 });
+        this.set(tm.x, tm.y, tm.z, 0, 0, { quiet: true });
+        this.events.push({ type: 'crumble', x: tm.x, y: tm.y, z: tm.z });
+        tm.kind = 'restore'; tm.t = 3.5;
       } else if (tm.kind === 'restore') {
-        if (this.fg[i] === B.air && !isOccupied(x, y)) {
-          this.set(x, y, B.crumble, 0, { keepTimer: true });
-          this.timers.delete(i);
-        } else if (this.fg[i] !== B.air) this.timers.delete(i);
-        else tm.t = 0.5;
+        if (this.get(tm.x, tm.y, tm.z) !== 0) { this.timers.delete(k); continue; }
+        if (occupied(tm.x, tm.y, tm.z)) { tm.t = 0.4; continue; }
+        this.set(tm.x, tm.y, tm.z, B.crumble, 0, { quiet: true });
+        this.timers.delete(k);
       } else if (tm.kind === 'boom') {
-        this.timers.delete(i);
-        this.explode(x, y, 3.6);
+        this.timers.delete(k);
+        this.explode(tm.x, tm.y, tm.z, 3.4);
       }
     }
   }
-  explode(cx, cy, r) {
-    this.events.push({ type: 'explode', x: cx, y: cy, r });
+  explode(cx, cy, cz, r) {
+    this.events.push({ type: 'explode', x: cx, y: cy, z: cz, r });
     const R = Math.ceil(r);
-    for (let y = cy - R; y <= cy + R; y++) for (let x = cx - R; x <= cx + R; x++) {
-      const dd = (x - cx) ** 2 + (y - cy) ** 2;
-      if (dd > r * r || !this.inb(x, y)) continue;
-      const id = this.get(x, y), d = BLOCKS[id];
-      if (id === B.air || id === B.bedrock || d.liquid) continue;
-      if (d.boom && !(x === cx && y === cy)) { this.ignite(x, y, 0.15 + Math.random() * 0.2); continue; }
-      this.set(x, y, B.air, 0, { silent: true });
-      if (Math.random() < 0.45) this.events.push({ type: 'debris', x, y, id });
-    }
-  }
-
-  // Keep pending crumble blocks in the saved world.
-  restorePending() {
-    for (const [i, tm] of this.timers) {
-      if (tm.kind === 'restore' && this.fg[i] === B.air) this.fg[i] = B.crumble;
-    }
-  }
-
-  // Scan the whole world for springs, sponges and growing plants.
-  rebuildRegistries() {
-    this.springs.clear(); this.sponges.clear(); this.growing.clear();
-    const fg = this.fg;
-    for (let i = 0; i < fg.length; i++) {
-      const id = fg[i];
-      if (id === B.air || id === B.stone || id === B.dirt) continue;
-      const d = BLOCKS[id];
-      if (d.spring) this.springs.add(i);
-      else if (d.sponge) this.sponges.add(i);
-      else if (d.plant && plantGrows(d, this.meta[i])) this.growing.set(i, growTime(d) * Math.random());
-    }
-  }
-
-  // --- light -------------------------------------------------------------------
-  // Fills sky[] and blk[] (0..15) for the rectangle (x0,y0,w,h).
-  computeLight(x0, y0, w, h, sky, blk, att) {
-    const W = this.W, fg = this.fg, bgArr = this.bg;
-    const LITWIN = B.litwindow;
-    for (let cx = 0; cx < w; cx++) {
-      const x = x0 + cx;
-      if (x < 0 || x >= W) {
-        for (let cy = 0; cy < h; cy++) { const k = cy * w + cx; sky[k] = 0; blk[k] = 0; att[k] = 4; }
-        continue;
-      }
-      // v: sky light reaching this cell. nat: the same, ignoring houses and
-      // trees, so the ground below them is not shaded in a vertical stripe.
-      let v = 15, nat = 15, grounded = false;
-      const yEnd = Math.min(this.H, y0 + h);
-      const groundY = this.terrainY[x];
-      for (let y = 0; y < yEnd; y++) {
-        const i = y * W + x, d = BLOCKS[fg[i]];
-        let cell;
-        if (!grounded && y >= groundY) { grounded = true; if (nat > v) v = nat; }
-        if (d.opaque) {
-          cell = v; v = v > 4 ? v - 4 : 0;
-        } else {
-          if (d.atten) { v = v > d.atten ? v - d.atten : 0; if (d.liquid) nat = nat > d.atten ? nat - d.atten : 0; }
-          cell = v;
-        }
-        if (y >= y0) {
-          const k = (y - y0) * w + cx;
-          sky[k] = cell;
-          let e = d.light;
-          if (!d.opaque && bgArr[i] === LITWIN && e < 8) e = 8;
-          blk[k] = e;
-          att[k] = d.opaque ? 3 : 1;
-        }
-      }
-      for (let y = Math.max(yEnd, y0); y < y0 + h; y++) { const k = (y - y0) * w + cx; sky[k] = 0; blk[k] = 0; att[k] = 4; }
-    }
-    spreadLight(sky, att, w, h);
-    spreadLight(blk, att, w, h);
-  }
-}
-
-function spreadLight(a, att, w, h) {
-  for (let pass = 0; pass < 2; pass++) {
-    for (let y = 0; y < h; y++) {
-      let k = y * w;
-      for (let x = 0; x < w; x++, k++) {
-        let v = a[k];
-        const t = att[k];
-        if (x > 0) { const n = a[k - 1] - t; if (n > v) v = n; }
-        if (y > 0) { const n = a[k - w] - t; if (n > v) v = n; }
-        a[k] = v;
-      }
-    }
-    for (let y = h - 1; y >= 0; y--) {
-      let k = y * w + w - 1;
-      for (let x = w - 1; x >= 0; x--, k--) {
-        let v = a[k];
-        const t = att[k];
-        if (x < w - 1) { const n = a[k + 1] - t; if (n > v) v = n; }
-        if (y < h - 1) { const n = a[k + w] - t; if (n > v) v = n; }
-        a[k] = v;
-      }
+    for (let y = cy - R; y <= cy + R; y++) for (let z = cz - R; z <= cz + R; z++) for (let x = cx - R; x <= cx + R; x++) {
+      if ((x - cx) ** 2 + (y - cy) ** 2 + (z - cz) ** 2 > r * r) continue;
+      const id = this.get(x, y, z);
+      if (!id || id === B.bedrock || BLOCKS[id].liquid || id === B.gate) continue;
+      if (id === B.boom && !(x === cx && y === cy && z === cz)) { this.ignite(x, y, z); const t = this.timers.get(`${x},${y},${z}`); if (t) t.t = 0.15 + Math.random() * 0.2; continue; }
+      this.set(x, y, z, 0, 0, { quiet: true });
+      if (Math.random() < 0.25) this.events.push({ type: 'debris', x, y, z, id });
     }
   }
 }
 
-function plantGrows(d, stage) {
-  const pl = d.plant;
-  if (!pl || !pl.time) return false;
-  if (stage < pl.stages - 1) return true;
-  return pl.final && pl.final !== 'stay' && pl.final !== 'none';
-}
-function growTime(d) { return d.plant.time * (0.75 + Math.random() * 0.5); }
-function plantSupported(plantId, belowId) {
-  const d = BLOCKS[plantId];
-  if (d.plant.final && d.plant.final.stack && belowId === plantId) return true;
-  return isSoil(belowId, d.plant.soil);
-}
-
-// Sinks let the same structure code write straight into the world during
-// generation, or collect operations to play back as a growth animation.
-class GenSink {
-  constructor(world) { this.w = world; }
-  set(x, y, id, m = 0) { this.w.setRaw(x, y, id, m); }
-  bg(x, y, id) { this.w.setBgRaw(x, y, id); }
-  get(x, y) { return this.w.get(x, y); }
-}
+// Sinks let structure code write straight into a chunk during generation, into
+// the world, or collect operations to replay as a growth animation.
 class CollectSink {
   constructor(world) { this.w = world; this.ops = []; }
-  set(x, y, id, m = 0) { this.ops.push({ x, y, id, meta: m, layer: 0 }); }
-  bg(x, y, id) { this.ops.push({ x, y, id, layer: 1 }); }
-  get(x, y) { return this.w.get(x, y); }
+  set(x, y, z, id, meta = 0) { this.ops.push({ x, y, z, id, meta }); }
+  get(x, y, z) { return this.w.get(x, y, z); }
+}
+class WorldSink {
+  constructor(world) { this.w = world; }
+  set(x, y, z, id, meta = 0) { this.w.set(x, y, z, id, meta, { quiet: true, keepAbove: true }); }
+  get(x, y, z) { return this.w.get(x, y, z); }
 }

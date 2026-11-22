@@ -1,256 +1,413 @@
 'use strict';
 // ---------------------------------------------------------------------------
-// UI: HUD, hotbar, block picker, world map, menus, toasts and touch controls.
+// UI: title screen (choose a world type), HUD, inventory + crafting,
+// creative block picker, race HUD and results, menus and touch controls.
 // ---------------------------------------------------------------------------
 
-const SEED_WORDS_A = ['Amber', 'Mossy', 'Sunny', 'Misty', 'Golden', 'Silver', 'Lucky', 'Quiet', 'Brave', 'Frosty', 'Cozy', 'Wild'];
-const SEED_WORDS_B = ['Valley', 'Otter', 'Harbor', 'Meadow', 'Comet', 'Pine', 'River', 'Fox', 'Lantern', 'Peak', 'Garden', 'Island'];
 function randomSeed() {
-  return SEED_WORDS_A[Math.floor(Math.random() * SEED_WORDS_A.length)] + SEED_WORDS_B[Math.floor(Math.random() * SEED_WORDS_B.length)] + Math.floor(Math.random() * 100);
+  const a = ['Amber', 'Mossy', 'Sunny', 'Misty', 'Golden', 'Silver', 'Lucky', 'Quiet', 'Brave', 'Frosty', 'Cozy', 'Wild'];
+  const b = ['Valley', 'Otter', 'Harbor', 'Meadow', 'Comet', 'Pine', 'River', 'Fox', 'Lantern', 'Peak', 'Garden', 'Island'];
+  return a[Math.floor(Math.random() * a.length)] + b[Math.floor(Math.random() * b.length)] + Math.floor(Math.random() * 100);
 }
+const $ = id => document.getElementById(id);
+const ordinal = n => n + (['th', 'st', 'nd', 'rd'][(n % 100 >> 3 ^ 1) && n % 10] || 'th');
 
 const UI = {
-  game: null, el: {}, tab: 'all', open: null, prevState: null, labelTimer: null, hudTimer: 0,
+  game: null, open: null, tab: 'all', craftTab: 'All', cursor: null, labelTimer: 0, hudT: 0,
 
   init(game) {
     this.game = game;
-    const $ = id => document.getElementById(id);
-    this.el = {
-      hud: $('hud'), hotbar: $('hotbar'), label: $('item-label'), toasts: $('toasts'),
-      timeText: $('time-text'), dayText: $('day-text'), timeIcon: $('time-icon'), locText: $('loc-text'), locIcon: $('loc-icon'),
-      pk: $('parkour-hud'), overlay: $('overlay'),
-      panels: { inv: $('panel-inv'), map: $('panel-map'), pause: $('panel-pause'), help: $('panel-help') },
-      tgFly: $('tg-fly'), tgWall: $('tg-wall'), tgMode: $('tg-mode'), touch: $('touch-controls'),
-      title: $('title-screen'), loading: $('loading'), seed: $('seed-input'),
-      btnContinue: $('btn-continue'), grid: $('inv-grid'), tabs: $('inv-tabs'), search: $('inv-search'),
-      mapCanvas: $('map-canvas'), mapMarkers: $('map-markers'), mapList: $('map-list'), mapScroll: $('map-scroll'),
-    };
     document.querySelectorAll('img[data-icon]').forEach(img => { img.src = makeIconURL(img.dataset.icon); });
-
+    // hotbar
     for (let i = 0; i < 9; i++) {
       const b = document.createElement('button');
       b.className = 'slot'; b.type = 'button';
-      b.innerHTML = `<span class="num">${i + 1}</span><img alt="">`;
-      b.addEventListener('click', () => game.selectSlot(i));
-      this.el.hotbar.appendChild(b);
+      b.innerHTML = `<span class="num">${i + 1}</span><img alt=""><span class="cnt"></span>`;
+      b.addEventListener('click', e => { e.stopPropagation(); game.selectSlot(i); });
+      $('hotbar').appendChild(b);
     }
-    $('btn-blocks').addEventListener('click', () => this.openPanel('inv'));
-    $('btn-map').addEventListener('click', () => this.openPanel('map'));
+    // hearts & bubbles
+    for (let i = 0; i < 10; i++) { const h = document.createElement('img'); h.className = 'pix'; $('hearts').appendChild(h); }
+    for (let i = 0; i < 10; i++) { const h = document.createElement('img'); h.className = 'pix'; h.src = makeIconURL('ui_bubble'); $('bubbles').appendChild(h); }
+    $('btn-inv').addEventListener('click', () => this.openPanel('inv'));
     $('btn-menu').addEventListener('click', () => this.openPanel('pause'));
-    this.el.tgFly.addEventListener('click', () => game.toggleFly());
-    this.el.tgWall.addEventListener('click', () => game.toggleWall());
-    this.el.tgMode.addEventListener('click', () => game.toggleTouchMode());
+    $('btn-view').addEventListener('click', () => game.toggleView());
+    $('btn-fly').addEventListener('click', () => game.toggleFly());
     document.querySelectorAll('[data-close]').forEach(b => b.addEventListener('click', () => this.closePanels()));
-    this.el.overlay.addEventListener('click', () => this.closePanels());
+    $('overlay').addEventListener('click', () => this.closePanels());
 
-    // block picker
+    // creative picker tabs
     for (const c of CATEGORIES) {
       const t = document.createElement('button');
       t.className = 'tab'; t.type = 'button'; t.textContent = c.name; t.dataset.cat = c.id;
-      t.setAttribute('role', 'tab');
-      t.addEventListener('click', () => { this.tab = c.id; this.renderInventory(); });
-      this.el.tabs.appendChild(t);
+      t.addEventListener('click', () => { this.tab = c.id; this.renderPicker(); });
+      $('pick-tabs').appendChild(t);
     }
-    this.el.search.addEventListener('input', () => this.renderInventory());
-    this.el.search.addEventListener('keydown', e => { if (e.key === 'Escape') this.closePanels(); e.stopPropagation(); });
+    $('pick-search').addEventListener('input', () => this.renderPicker());
+    $('pick-search').addEventListener('keydown', e => { if (e.key === 'Escape') this.closePanels(); e.stopPropagation(); });
+    // crafting tabs
+    const cats = ['All', ...new Set(RECIPES.map(r => r.cat))];
+    for (const c of cats) {
+      const t = document.createElement('button');
+      t.className = 'tab'; t.type = 'button'; t.textContent = c; t.dataset.cat = c;
+      t.addEventListener('click', () => { this.craftTab = c; this.renderCraft(); });
+      $('craft-tabs').appendChild(t);
+    }
+    // backpack slots
+    for (let i = 9; i < 36; i++) $('pack').appendChild(this.makeInvSlot(i));
+    for (let i = 0; i < 9; i++) $('pack-bar').appendChild(this.makeInvSlot(i));
+    document.addEventListener('mousemove', e => { const c = $('cursor-stack'); c.style.left = e.clientX + 'px'; c.style.top = e.clientY + 'px'; });
 
     // pause menu
     $('pm-resume').addEventListener('click', () => this.closePanels());
     $('pm-save').addEventListener('click', () => game.saveNow(false));
+    $('pm-view').addEventListener('click', () => { game.toggleView(); this.closePanels(); });
     $('pm-cine').addEventListener('click', () => { this.closePanels(); game.setCinema(true); });
     $('pm-sound').addEventListener('click', () => { game.sound.setEnabled(!game.sound.enabled); this.updateMenu(); game.saveSettings(); });
     $('pm-music').addEventListener('click', () => { game.sound.setMusic(!game.sound.musicOn); this.updateMenu(); game.saveSettings(); });
-    $('pm-zoomin').addEventListener('click', () => game.zoom(1.15));
-    $('pm-zoomout').addEventListener('click', () => game.zoom(1 / 1.15));
+    $('pm-dist').addEventListener('click', () => { game.cycleDistance(); this.updateMenu(); });
     $('pm-help').addEventListener('click', () => this.openPanel('help'));
     $('pm-copy').addEventListener('click', () => this.copySeed());
     $('pm-quit').addEventListener('click', () => { this.closePanels(); game.quitToTitle(); });
+    $('respawn-btn').addEventListener('click', () => game.respawn());
 
     // title screen
-    this.el.seed.value = randomSeed();
-    $('seed-random').addEventListener('click', () => { this.el.seed.value = randomSeed(); game.sound.init(); game.sound.play('click'); });
-    $('btn-new').addEventListener('click', () => {
-      const s = this.el.seed.value.trim() || randomSeed();
-      this.el.seed.value = s;
-      game.newWorld(s);
+    document.querySelectorAll('.mode-card').forEach(c => c.addEventListener('click', () => { game.sound.init(); game.sound.play('click'); this.showTitleView(c.dataset.mode); }));
+    document.querySelectorAll('[data-back]').forEach(b => b.addEventListener('click', () => this.showTitleView('home')));
+    $('seed-input').value = randomSeed();
+    $('seed-random').addEventListener('click', () => { $('seed-input').value = randomSeed(); game.sound.play('click'); });
+    $('btn-create').addEventListener('click', () => {
+      const s = $('seed-input').value.trim() || randomSeed();
+      $('seed-input').value = s;
+      game.newWorld(this.worldMode, s);
     });
-    this.el.seed.addEventListener('keydown', e => { if (e.key === 'Enter') $('btn-new').click(); });
-    this.el.btnContinue.addEventListener('click', () => game.continueWorld());
+    $('seed-input').addEventListener('keydown', e => { if (e.key === 'Enter') $('btn-create').click(); e.stopPropagation(); });
+    $('btn-continue').addEventListener('click', () => game.continueWorld(this.worldMode));
+    $('btn-cup').addEventListener('click', () => game.startCup());
     $('btn-howto').addEventListener('click', () => this.openPanel('help'));
-
-    // map clicks
-    this.el.mapCanvas.addEventListener('click', e => {
-      const r = this.el.mapCanvas.getBoundingClientRect();
-      const wx = ((e.clientX - r.left) / r.width) * game.world.W;
-      game.travelTo({ x: wx, name: null });
-    });
+    $('res-next').addEventListener('click', () => game.resultsAction('next'));
+    $('res-again').addEventListener('click', () => game.resultsAction('again'));
+    $('res-menu').addEventListener('click', () => game.resultsAction('menu'));
 
     // touch
     const touch = window.matchMedia('(pointer: coarse)').matches || 'ontouchstart' in window;
     this.setTouch(touch);
     window.addEventListener('touchstart', () => this.setTouch(true), { passive: true, once: true });
-    Input.bindButton($('tc-left'), 'left');
-    Input.bindButton($('tc-right'), 'right');
-    Input.bindButton($('tc-jump'), 'jump');
-    Input.bindButton($('tc-down'), 'down');
-    this.updateMenu();
+    Input.bindButton($('t-jump'), 'jump');
+    Input.bindButton($('t-down'), 'down');
+    Input.bindButton($('t-up'), 'up');
+    $('t-place').addEventListener('pointerdown', e => { e.preventDefault(); Input.tapPlace = true; });
+    $('t-mine').addEventListener('pointerdown', e => { e.preventDefault(); Input.holdMine = true; $('t-mine').classList.add('held'); });
+    const stopMine = e => { e.preventDefault(); Input.holdMine = false; $('t-mine').classList.remove('held'); };
+    $('t-mine').addEventListener('pointerup', stopMine); $('t-mine').addEventListener('pointercancel', stopMine); $('t-mine').addEventListener('pointerleave', stopMine);
+    Input.onJoy = j => {
+      const base = $('joy');
+      if (!j) { base.classList.remove('on'); return; }
+      base.classList.add('on');
+      base.style.left = j.x0 + 'px'; base.style.top = j.y0 + 'px';
+      let dx = j.x - j.x0, dy = j.y - j.y0; const l = Math.hypot(dx, dy); if (l > 50) { dx *= 50 / l; dy *= 50 / l; }
+      $('joy-knob').style.transform = `translate(${dx}px, ${dy}px)`;
+    };
+    this.renderCourses();
   },
-
   setTouch(on) {
     document.body.classList.toggle('touch', on);
-    this.el.touch.hidden = !on;
-    Input.touch.isTouch = on;
+    Input.isTouch = on;
   },
 
-  // --- screens ---------------------------------------------------------------
+  // --- title -----------------------------------------------------------------------
   showTitle() {
-    this.el.title.hidden = false;
-    this.el.title.classList.remove('leaving');
-    const info = Save.info();
-    const b = this.el.btnContinue;
-    if (info) {
-      b.hidden = false;
-      b.textContent = `Continue “${info.seed}” · Day ${info.day || 1}`;
-    } else b.hidden = true;
+    $('title-screen').hidden = false;
+    $('title-screen').classList.remove('leaving');
+    this.showTitleView('home');
     this.showHUD(false);
   },
-  hideTitle() {
-    this.el.title.classList.add('leaving');
-    setTimeout(() => { this.el.title.hidden = true; }, 600);
+  showTitleView(v) {
+    document.querySelectorAll('.title-view').forEach(el => { el.hidden = el.dataset.view !== (v === 'survival' || v === 'creative' ? 'world' : v); });
+    if (v === 'survival' || v === 'creative') {
+      this.worldMode = v;
+      $('world-title').textContent = v === 'survival' ? 'Survival world' : 'Creative world';
+      $('world-sub').textContent = v === 'survival'
+        ? 'Mine blocks to collect them, craft tools, and build your home. Watch your hearts!'
+        : 'Every block is yours. Fly around and build anything.';
+      const info = Save.info(v);
+      $('btn-continue').hidden = !info;
+      if (info) $('btn-continue').textContent = `Continue “${info.seed}” · Day ${info.day}`;
+    }
+    if (v === 'parkour') this.renderCourses();
   },
-  showLoading(on) { this.el.loading.hidden = !on; },
-  showHUD(on) {
-    this.el.hud.hidden = false;
-    this.el.hud.classList.toggle('dim', !on);
-    if (!on) this.el.hud.setAttribute('aria-hidden', 'true'); else this.el.hud.removeAttribute('aria-hidden');
+  hideTitle() { $('title-screen').classList.add('leaving'); setTimeout(() => { $('title-screen').hidden = true; }, 500); },
+  renderCourses() {
+    const box = $('course-list');
+    box.textContent = '';
+    const best = Store.get('pr3d.parkour', {});
+    for (const def of COURSES) {
+      const b = document.createElement('button');
+      b.type = 'button'; b.className = 'course-card';
+      const rec = best[def.id];
+      b.innerHTML = `<span class="cc-name"></span><span class="cc-desc"></span><span class="cc-best"></span>`;
+      b.querySelector('.cc-name').textContent = def.name;
+      b.querySelector('.cc-desc').textContent = def.desc;
+      b.querySelector('.cc-best').textContent = rec ? `Best: ${ordinal(rec.place)} · ${formatTime(rec.time)}` : 'Not played yet';
+      b.addEventListener('click', () => this.game.startPractice(def));
+      box.appendChild(b);
+    }
+    const cup = Store.get('pr3d.cups', 0);
+    $('cup-wins').textContent = cup ? `Crowns won: ${cup}` : 'Win three rounds to take the crown';
   },
+  showLoading(on, text) { $('loading').hidden = !on; if (text) $('loading-text').textContent = text; },
 
-  // --- hotbar ---------------------------------------------------------------
+  // --- HUD -------------------------------------------------------------------------------
+  showHUD(on) { $('hud').hidden = false; $('hud').classList.toggle('dim', !on); },
+  setMode(mode) {
+    document.body.dataset.mode = mode;
+    $('btn-inv').querySelector('.lbl').textContent = mode === 'creative' ? 'Blocks' : 'Inventory';
+    $('race-hud').hidden = mode !== 'parkour';
+  },
   refreshHotbar() {
     const g = this.game;
-    [...this.el.hotbar.children].forEach((b, i) => {
-      const d = BLOCKS[g.hotbar[i]];
+    [...$('hotbar').children].forEach((b, i) => {
+      const s = g.slot(i);
       b.classList.toggle('sel', i === g.sel);
-      b.querySelector('img').src = makeIconURL(d.icon);
-      b.title = d.name;
-      b.setAttribute('aria-label', `Slot ${i + 1}: ${d.name}`);
-      b.setAttribute('aria-pressed', i === g.sel ? 'true' : 'false');
+      const img = b.querySelector('img');
+      if (s) { img.src = itemIcon(s.id); img.hidden = false; b.title = BLOCKS[s.id].name; }
+      else { img.hidden = true; b.title = 'Empty'; }
+      b.querySelector('.cnt').textContent = s && g.mode === 'survival' && s.n > 1 ? s.n : '';
     });
-    if (this.open === 'inv') this.renderInventory();
+    if (this.open === 'inv') this.renderInv();
   },
   showItemLabel(text) {
-    const l = this.el.label;
-    l.textContent = text;
-    l.classList.add('show');
+    const l = $('item-label');
+    l.textContent = text; l.classList.add('show');
     clearTimeout(this.labelTimer);
-    this.labelTimer = setTimeout(() => l.classList.remove('show'), 1600);
+    this.labelTimer = setTimeout(() => l.classList.remove('show'), 1500);
   },
-  updateToggles() {
-    const g = this.game;
-    this.el.tgFly.setAttribute('aria-pressed', g.player && g.player.fly ? 'true' : 'false');
-    this.el.tgWall.setAttribute('aria-pressed', g.wallMode ? 'true' : 'false');
-    const build = g.touchMode === 'build';
-    this.el.tgMode.setAttribute('aria-pressed', build ? 'true' : 'false');
-    this.el.tgMode.querySelector('span').textContent = build ? 'Build' : 'Dig';
-    this.el.tgMode.querySelector('img').src = makeIconURL(build ? 'grass' : 'ui_pick');
-  },
-
   toast(msg) {
-    const box = this.el.toasts;
+    const box = $('toasts');
     while (box.children.length >= 3) box.firstChild.remove();
     const t = document.createElement('div');
     t.className = 'toast'; t.textContent = msg;
     box.appendChild(t);
-    setTimeout(() => t.classList.add('out'), 2900);
-    setTimeout(() => t.remove(), 3400);
+    setTimeout(() => t.classList.add('out'), 3000);
+    setTimeout(() => t.remove(), 3500);
   },
-
   updateHUD(dt) {
     const g = this.game;
-    this.hudTimer -= dt;
-    if (this.hudTimer > 0 || g.state === 'title') return;
-    this.hudTimer = 0.25;
-    const hours = (6 + g.time * 24) % 24;
-    const h = Math.floor(hours), m = Math.floor((hours - h) * 60 / 10) * 10;
-    this.el.timeText.textContent = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
-    this.el.dayText.textContent = `Day ${g.day}`;
-    const icon = g.weather.rain > 0.5 ? 'ui_rain' : g.isNight() ? 'ui_moon' : 'ui_sun';
-    if (this.el.timeIcon.dataset.k !== icon) { this.el.timeIcon.src = makeIconURL(icon); this.el.timeIcon.dataset.k = icon; }
-    const loc = g.locationInfo();
-    if (this.el.locText.textContent !== loc.name) this.el.locText.textContent = loc.name;
-    if (this.el.locIcon.dataset.k !== loc.icon) { this.el.locIcon.src = makeIconURL(loc.icon); this.el.locIcon.dataset.k = loc.icon; }
+    this.hudT -= dt;
+    if (g.mode === 'parkour' && g.race) this.updateRaceHUD(g.race);
+    if (this.hudT > 0) return;
+    this.hudT = 0.2;
+    if (g.mode !== 'parkour') {
+      const hours = (6 + g.time * 24) % 24, h = Math.floor(hours), m = Math.floor((hours - h) * 6) * 10;
+      $('time-text').textContent = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+      $('day-text').textContent = `Day ${g.day}`;
+      const icon = g.isNight() ? 'ui_moon' : 'ui_sun';
+      if ($('time-icon').dataset.k !== icon) { $('time-icon').src = makeIconURL(icon); $('time-icon').dataset.k = icon; }
+      $('loc-text').textContent = g.locationName();
+    }
+    const showHealth = g.mode === 'survival';
+    $('status-row').hidden = !showHealth;
+    if (showHealth) {
+      [...$('hearts').children].forEach((img, i) => {
+        const v = g.hp - i * 2, k = v >= 2 ? 'ui_heart' : v === 1 ? 'ui_heart_half' : 'ui_heart_empty';
+        if (img.dataset.k !== k) { img.src = makeIconURL(k); img.dataset.k = k; }
+      });
+      const showAir = g.player && g.player.headInWater || g.air < 10;
+      $('bubbles').style.visibility = showAir ? 'visible' : 'hidden';
+      [...$('bubbles').children].forEach((img, i) => { img.style.opacity = g.air > i ? 1 : 0.15; });
+    }
+    $('btn-fly').hidden = g.mode !== 'creative';
+    $('btn-fly').setAttribute('aria-pressed', g.player && g.player.fly ? 'true' : 'false');
+    $('lock-hint').hidden = !((g.state === 'play' || (g.state === 'race' && g.race && !g.race.camOverride)) && !Input.isTouch && !Input.locked && !Input.freeLook);
+    $('t-up').hidden = !(g.mode === 'creative' && g.player && g.player.fly);
+    $('t-down').hidden = !(g.mode === 'creative' && g.player && g.player.fly);
+    document.body.classList.toggle('build-mode', g.mode !== 'parkour');
+  },
+  hurtFlash() { const f = $('hurt-flash'); f.classList.remove('on'); void f.offsetWidth; f.classList.add('on'); },
+
+  // --- race ---------------------------------------------------------------------------
+  updateRaceHUD(race) {
+    const p = race.player;
+    if (!p) return;
+    const place = race.placeOf(p);
+    const total = race.racers.length;
+    $('rh-place').innerHTML = `${place}<sup>${ordinal(place).slice(String(place).length)}</sup>`;
+    $('rh-of').textContent = `of ${total}`;
+    $('rh-time').textContent = formatTime(race.timer);
+    $('rh-name').textContent = race.def.name;
+    $('rh-info').textContent = race.qualify ? `${race.opts.roundName} · top ${race.qualify} qualify · ${race.finishers.length}/${race.qualify} in` : 'Practice run';
+  },
+  countdown(text, big) {
+    const c = $('countdown');
+    c.textContent = text; c.className = big ? 'go' : '';
+    void c.offsetWidth; c.classList.add('show');
+  },
+  showResults(race, info) {
+    const list = $('res-list');
+    list.textContent = '';
+    const order = race.racers.slice().sort((a, b) => (a.finished === b.finished ? (a.finished ? a.place - b.place : b.z - a.z) : a.finished ? -1 : 1));
+    order.forEach((r, i) => {
+      const row = document.createElement('div');
+      const q = race.qualify ? (r.finished && r.place <= race.qualify) : r.finished;
+      row.className = 'res-row' + (r.isPlayer ? ' you' : '') + (q ? ' q' : '');
+      const sw = `rgb(${r.look.body.map(v => Math.round(v * 255)).join(',')})`;
+      row.innerHTML = `<span class="rr-pos"></span><span class="rr-dot"></span><span class="rr-name"></span><span class="rr-time"></span>`;
+      row.querySelector('.rr-pos').textContent = i + 1;
+      row.querySelector('.rr-dot').style.background = sw;
+      row.querySelector('.rr-name').textContent = r.isPlayer ? `${r.name} (you)` : r.name;
+      row.querySelector('.rr-time').textContent = r.finished ? formatTime(r.time) : (race.qualify ? 'Out' : '—');
+      list.appendChild(row);
+    });
+    $('res-title').textContent = info.title;
+    $('res-sub').textContent = info.sub;
+    $('res-next').hidden = !info.next;
+    $('res-next').textContent = info.nextLabel || 'Next round';
+    $('res-again').textContent = info.againLabel || 'Race again';
+    this.openPanel('results');
   },
 
-  // --- parkour ---------------------------------------------------------------
-  showParkour(pk) { this.el.pk.hidden = false; this.updateParkour(pk); },
-  hideParkour() { this.el.pk.hidden = true; },
-  updateParkour(pk) {
-    if (!pk.active) return;
-    const c = pk.active;
-    this.el.pk.querySelector('.pk-name').textContent = c.name;
-    this.el.pk.querySelector('.pk-time').textContent = formatTime(pk.time);
-    const parts = [];
-    if (!c.custom && c.checks.length) parts.push(`Checkpoint ${pk.cp + 1}/${c.checks.length}`);
-    const best = c.custom ? undefined : pk.bestFor(c);
-    if (best !== undefined) parts.push(`Best ${formatTime(best)}`);
-    parts.push(Input.touch.isTouch ? 'Fall = retry' : 'R = retry');
-    const info = parts.join(' · ');
-    const el = this.el.pk.querySelector('.pk-info');
-    if (el.textContent !== info) el.textContent = info;
-  },
-
-  // --- panels ---------------------------------------------------------------
+  // --- panels --------------------------------------------------------------------------
   openPanel(name) {
     const g = this.game;
-    if (this.open === name) { this.closePanels(); return; }
+    if (this.open === name && name !== 'results') { this.closePanels(); return; }
     if (g.state === 'intro' || g.state === 'loading') return;
     if (!this.open) this.prevState = g.state;
-    for (const [k, p] of Object.entries(this.el.panels)) p.hidden = k !== name;
+    for (const p of document.querySelectorAll('.panel')) p.hidden = p.id !== 'panel-' + name;
     const overTitle = this.prevState === 'title';
-    this.el.overlay.hidden = false;
-    this.el.overlay.style.zIndex = overTitle ? 34 : '';
-    this.el.panels[name].style.zIndex = overTitle ? 35 : '';
+    $('overlay').hidden = false;
+    $('overlay').style.zIndex = overTitle ? 34 : '';
+    $('panel-' + name).style.zIndex = overTitle ? 35 : '';
     this.open = name;
-    if (g.state === 'play') g.state = 'menu';
-    g.mining = null;
-    Input.mouse.left = Input.mouse.right = false;
+    if (g.state === 'play' || g.state === 'race') g.state = 'menu';
+    Input.releaseLock();
     g.sound.play('open');
-    if (name === 'inv') { this.el.search.value = ''; this.renderInventory(); if (!Input.touch.isTouch) setTimeout(() => this.el.search.focus(), 30); }
-    if (name === 'map') this.renderMap();
+    if (name === 'inv') {
+      $('inv-survival').hidden = g.mode !== 'survival';
+      $('inv-creative').hidden = g.mode !== 'creative';
+      $('inv-title').textContent = g.mode === 'creative' ? 'All blocks & items' : 'Inventory & crafting';
+      if (g.mode === 'creative') { $('pick-search').value = ''; this.renderPicker(); }
+      else this.renderInv();
+    }
     if (name === 'pause') { this.updateMenu(); g.saveNow(true); }
-    if (name === 'help') { /* static */ }
   },
   closePanels() {
     if (!this.open) return;
     const g = this.game;
-    for (const p of Object.values(this.el.panels)) p.hidden = true;
-    this.el.overlay.hidden = true;
+    if (this.open === 'results') return;
+    for (const p of document.querySelectorAll('.panel')) p.hidden = true;
+    $('overlay').hidden = true;
+    if (this.cursor) { g.giveBack(this.cursor); this.cursor = null; this.drawCursor(); }
     this.open = null;
     if (g.state === 'menu') g.state = this.prevState === 'menu' ? 'play' : (this.prevState || 'play');
     if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
     g.sound.play('close');
   },
+  closeResults() {
+    $('panel-results').hidden = true; $('overlay').hidden = true; this.open = null;
+  },
 
-  renderInventory() {
-    const g = this.game, q = this.el.search.value.trim().toLowerCase();
-    [...this.el.tabs.children].forEach(t => t.setAttribute('aria-selected', t.dataset.cat === this.tab ? 'true' : 'false'));
+  // --- inventory & crafting (survival) ---------------------------------------------------
+  makeInvSlot(i) {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'islot'; b.dataset.i = i;
+    b.innerHTML = '<img alt=""><span class="cnt"></span>';
+    b.addEventListener('click', e => this.clickSlot(i, e.shiftKey));
+    b.addEventListener('contextmenu', e => { e.preventDefault(); this.clickSlot(i, false, true); });
+    return b;
+  },
+  clickSlot(i, shift, half) {
+    const g = this.game, inv = g.inv;
+    const s = inv[i];
+    if (shift && s) {
+      // quick move between hotbar and backpack
+      const range = i < 9 ? [9, 36] : [0, 9];
+      inv[i] = null;
+      const left = g.addToRange(s.id, s.n, range[0], range[1]);
+      if (left) inv[i] = { id: s.id, n: left };
+    } else if (!this.cursor) {
+      if (s) {
+        if (half && s.n > 1) { const k = Math.ceil(s.n / 2); this.cursor = { id: s.id, n: k }; s.n -= k; }
+        else { this.cursor = s; inv[i] = null; }
+      }
+    } else if (!s) {
+      if (half) { inv[i] = { id: this.cursor.id, n: 1 }; this.cursor.n--; if (!this.cursor.n) this.cursor = null; }
+      else { inv[i] = this.cursor; this.cursor = null; }
+    } else if (s.id === this.cursor.id) {
+      const max = BLOCKS[s.id].stack, room = max - s.n;
+      const k = half ? Math.min(1, room) : Math.min(room, this.cursor.n);
+      s.n += k; this.cursor.n -= k;
+      if (!this.cursor.n) this.cursor = null;
+    } else { inv[i] = this.cursor; this.cursor = s; }
+    g.sound.play('click');
+    this.drawCursor();
+    g.inventoryChanged();
+  },
+  drawCursor() {
+    const c = $('cursor-stack');
+    if (!this.cursor) { c.hidden = true; return; }
+    c.hidden = false;
+    c.querySelector('img').src = itemIcon(this.cursor.id);
+    c.querySelector('.cnt').textContent = this.cursor.n > 1 ? this.cursor.n : '';
+  },
+  renderInv() {
+    const g = this.game;
+    document.querySelectorAll('.islot').forEach(b => {
+      const s = g.inv[+b.dataset.i];
+      const img = b.querySelector('img');
+      if (s) { img.src = itemIcon(s.id); img.hidden = false; b.title = `${BLOCKS[s.id].name} × ${s.n}`; }
+      else { img.hidden = true; b.title = 'Empty'; }
+      b.querySelector('.cnt').textContent = s && s.n > 1 ? s.n : '';
+      b.classList.toggle('sel', +b.dataset.i === g.sel);
+    });
+    this.renderCraft();
+  },
+  renderCraft() {
+    const g = this.game, list = $('craft-list');
+    [...$('craft-tabs').children].forEach(t => t.setAttribute('aria-selected', t.dataset.cat === this.craftTab ? 'true' : 'false'));
+    list.textContent = '';
+    const recs = RECIPES.filter(r => this.craftTab === 'All' || r.cat === this.craftTab)
+      .map(r => ({ r, ok: g.canMake(r) }))
+      .sort((a, b) => (b.ok - a.ok));
+    for (const { r, ok } of recs) {
+      const row = document.createElement('div');
+      row.className = 'recipe' + (ok ? ' ok' : '');
+      const out = BLOCKS[r.outId];
+      row.innerHTML = `<img class="rc-icon" alt=""><div class="rc-body"><div class="rc-name"></div><div class="rc-in"></div></div><button type="button" class="btn small rc-make">Make</button>`;
+      row.querySelector('.rc-icon').src = itemIcon(r.outId);
+      row.querySelector('.rc-name').textContent = r.outN > 1 ? `${out.name} × ${r.outN}` : out.name;
+      const ins = row.querySelector('.rc-in');
+      for (const ing of r.ins) {
+        const have = g.countItems(ing.ids);
+        const chip = document.createElement('span');
+        chip.className = 'chip-in' + (have >= ing.n ? ' have' : '');
+        chip.innerHTML = '<img alt=""><span></span>';
+        chip.querySelector('img').src = itemIcon(ing.ids[0]);
+        chip.querySelector('span').textContent = `${Math.min(have, ing.n)}/${ing.n} ${ing.label}`;
+        ins.appendChild(chip);
+      }
+      const btn = row.querySelector('.rc-make');
+      btn.disabled = !ok;
+      btn.addEventListener('click', e => { g.make(r, e.shiftKey ? 8 : 1); });
+      list.appendChild(row);
+    }
+  },
+
+  // --- creative picker ----------------------------------------------------------------------
+  renderPicker() {
+    const g = this.game, q = $('pick-search').value.trim().toLowerCase();
+    [...$('pick-tabs').children].forEach(t => t.setAttribute('aria-selected', t.dataset.cat === this.tab ? 'true' : 'false'));
     const items = pickableItems().filter(d => (q ? d.name.toLowerCase().includes(q) : (this.tab === 'all' || d.cat === this.tab)));
-    const grid = this.el.grid;
+    const grid = $('pick-grid');
     grid.textContent = '';
-    if (!items.length) { const e = document.createElement('div'); e.className = 'empty'; e.textContent = 'Nothing matches that search.'; grid.appendChild(e); return; }
+    if (!items.length) { grid.innerHTML = '<div class="empty">Nothing matches that search.</div>'; return; }
     const frag = document.createDocumentFragment();
     for (const d of items) {
       const b = document.createElement('button');
-      b.type = 'button'; b.className = 'item' + (g.hotbar.includes(d.id) ? ' in-bar' : '');
-      b.innerHTML = `<img alt=""><span></span>`;
-      b.querySelector('img').src = makeIconURL(d.icon);
+      b.type = 'button'; b.className = 'item';
+      b.innerHTML = '<img alt=""><span></span>';
+      b.querySelector('img').src = itemIcon(d.id);
       b.querySelector('span').textContent = d.name;
-      b.title = d.name;
-      b.addEventListener('click', () => {
-        g.setHotbarItem(g.sel, d.id);
-        g.sound.play('click');
-        this.toast(`${d.name} is in slot ${g.sel + 1}`);
-      });
+      b.addEventListener('click', () => { g.setHotbarItem(g.sel, d.id); this.toast(`${d.name} is in slot ${g.sel + 1}`); });
       frag.appendChild(b);
     }
     grid.appendChild(frag);
@@ -258,87 +415,19 @@ const UI = {
 
   updateMenu() {
     const g = this.game;
-    document.getElementById('pm-sound').textContent = `Sound: ${g.sound.enabled ? 'on' : 'off'}`;
-    document.getElementById('pm-music').textContent = `Music: ${g.sound.musicOn ? 'on' : 'off'}`;
-    if (g.world) document.getElementById('pm-seed').textContent = g.world.seedStr;
+    $('pm-sound').textContent = `Sound: ${g.sound.enabled ? 'on' : 'off'}`;
+    $('pm-music').textContent = `Music: ${g.sound.musicOn ? 'on' : 'off'}`;
+    $('pm-dist').textContent = `View distance: ${['Near', 'Medium', 'Far'][g.distLevel]}`;
+    $('pm-seed').textContent = g.world ? g.world.seedStr.replace(/^parkour:/, '') : '';
+    $('pm-seedbox').hidden = g.mode === 'parkour';
+    $('pm-save').hidden = g.mode === 'parkour';
+    $('pm-quit').textContent = g.mode === 'parkour' ? 'Leave the race' : 'Save and quit to title';
   },
   copySeed() {
     const s = this.game.world.seedStr;
-    const done = () => this.toast(`Seed “${s}” copied`);
-    try {
-      navigator.clipboard.writeText(s).then(done, () => this.selectSeed());
-    } catch (e) { this.selectSeed(); }
+    try { navigator.clipboard.writeText(s).then(() => this.toast(`Seed “${s}” copied`), () => this.toast(`Seed: ${s}`)); }
+    catch (e) { this.toast(`Seed: ${s}`); }
   },
-  selectSeed() {
-    const el = document.getElementById('pm-seed');
-    const r = document.createRange(); r.selectNodeContents(el);
-    const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
-    this.toast('Seed selected. Copy it with your keyboard.');
-  },
-
-  // --- map ---------------------------------------------------------------
-  renderMap() {
-    const g = this.game, w = g.world;
-    const Y0 = 30, Y1 = 150, sxStep = 2;
-    const mw = Math.ceil(w.W / sxStep), mh = Y1 - Y0;
-    const c = this.el.mapCanvas;
-    c.width = mw; c.height = mh;
-    const ctx = c.getContext('2d');
-    const img = ctx.createImageData(mw, mh);
-    const d = img.data;
-    const skyTop = hexRgb('#5aa2e6'), skyBot = hexRgb('#cfe9ff');
-    for (let my = 0; my < mh; my++) {
-      const y = Y0 + my;
-      const sky = mixRgb(skyTop, skyBot, my / mh);
-      for (let mx = 0; mx < mw; mx++) {
-        const x = mx * sxStep;
-        let col = null;
-        for (let k = 0; k < sxStep && !col; k++) {
-          const id = w.fg[y * w.W + x + k];
-          if (id) col = BLOCKS[id].mapColor;
-        }
-        if (!col) {
-          const b = w.bg[y * w.W + x];
-          col = b && BLOCKS[b].mapColor ? shadeRgb(BLOCKS[b].mapColor, 0.45) : sky;
-        }
-        const o = (my * mw + mx) * 4;
-        d[o] = col[0]; d[o + 1] = col[1]; d[o + 2] = col[2]; d[o + 3] = 255;
-      }
-    }
-    ctx.putImageData(img, 0, 0);
-    // markers
-    const box = this.el.mapMarkers;
-    box.textContent = '';
-    requestAnimationFrame(() => {
-      const r = c.getBoundingClientRect();
-      const scaleX = r.width / w.W, scaleY = r.height / mh;
-      const add = (x, y, icon, label, cls = '') => {
-        const m = document.createElement('div');
-        m.className = 'mk ' + cls;
-        m.style.left = (x * scaleX) + 'px';
-        m.style.top = ((y - Y0) * scaleY) + 'px';
-        m.innerHTML = `<span></span><img alt="">`;
-        m.querySelector('span').textContent = label;
-        m.querySelector('img').src = makeIconURL(icon);
-        box.appendChild(m);
-      };
-      for (const p of g.places()) add(p.x, p.y, p.icon, p.short);
-      add(g.player.x, g.player.y - 1.5, 'ui_player', 'You', 'you');
-      this.el.mapScroll.scrollLeft = g.player.x * scaleX - this.el.mapScroll.clientWidth / 2;
-    });
-    // destination list
-    const list = this.el.mapList;
-    list.textContent = '';
-    for (const p of g.places()) {
-      const b = document.createElement('button');
-      b.type = 'button'; b.className = 'place';
-      b.innerHTML = `<img alt=""><span><span class="pl-name"></span><span class="pl-kind"></span></span><span class="pl-best"></span>`;
-      b.querySelector('img').src = makeIconURL(p.icon);
-      b.querySelector('.pl-name').textContent = p.name;
-      b.querySelector('.pl-kind').textContent = p.kind;
-      if (p.best !== undefined) b.querySelector('.pl-best').textContent = formatTime(p.best);
-      b.addEventListener('click', () => g.travelTo(p));
-      list.appendChild(b);
-    }
-  },
+  showDeath(cause) { $('death-cause').textContent = cause; $('death-screen').hidden = false; },
+  hideDeath() { $('death-screen').hidden = true; },
 };

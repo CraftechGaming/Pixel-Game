@@ -131,3 +131,21 @@ const Store = {
   },
   remove(key) { try { localStorage.removeItem(key); } catch (e) { /* ignore */ } },
 };
+
+// 3D value noise for caves and ores.
+function hash3(x, y, z, s) {
+  let h = (Math.imul(x | 0, 374761393) + Math.imul(y | 0, 668265263) + Math.imul(z | 0, 2147483647) + Math.imul(s | 0, 1442695041)) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  h ^= h >>> 16;
+  return (h >>> 0) / 4294967296;
+}
+function noise3(x, y, z, s) {
+  const ix = Math.floor(x), iy = Math.floor(y), iz = Math.floor(z);
+  const fx = x - ix, fy = y - iy, fz = z - iz;
+  const ux = fx * fx * (3 - 2 * fx), uy = fy * fy * (3 - 2 * fy), uz = fz * fz * (3 - 2 * fz);
+  const a = lerp(hash3(ix, iy, iz, s), hash3(ix + 1, iy, iz, s), ux);
+  const b = lerp(hash3(ix, iy + 1, iz, s), hash3(ix + 1, iy + 1, iz, s), ux);
+  const c = lerp(hash3(ix, iy, iz + 1, s), hash3(ix + 1, iy, iz + 1, s), ux);
+  const d = lerp(hash3(ix, iy + 1, iz + 1, s), hash3(ix + 1, iy + 1, iz + 1, s), ux);
+  return lerp(lerp(a, b, uy), lerp(c, d, uy), uz);
+}

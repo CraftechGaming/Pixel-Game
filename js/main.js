@@ -1,724 +1,1009 @@
 'use strict';
 // ---------------------------------------------------------------------------
-// Game: state machine, main loop, interaction, ambient life and glue code.
+// Game: modes (survival, creative, parkour), main loop, chunk streaming,
+// camera, mining and building, survival rules, cinematics and races.
 // ---------------------------------------------------------------------------
 
 const STEP = 1 / 60;
-const REACH = 8;
-const NO_INPUT = { left: false, right: false, up: false, down: false, jumpHeld: false, jumpPressed: false, sprint: false };
+const DAY_LEN = 600;
 const REDUCED_MOTION = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-const DEFAULT_HOTBAR = ['planks_oak', 'stonebricks', 'glass', 'door', 'torch', 'water', 'wheat', 'sap_oak', 'houseseed'];
+const CREATIVE_BAR = ['grass', 'planks_oak', 'stonebricks', 'glass', 'door', 'torch', 'water', 'houseseed', 'wonderseed'];
+const SPIRAL = (() => {
+  const s = [];
+  for (let dz = -10; dz <= 10; dz++) for (let dx = -10; dx <= 10; dx++) s.push([dx, dz, dx * dx + dz * dz]);
+  return s.sort((a, b) => a[2] - b[2]);
+})();
+const VILLAGER_LINES = [
+  'Hi there! Mine a tree to get started.', 'Turn logs into planks, then make a pickaxe!', 'Stone needs a pickaxe to break.',
+  'Cook iron ore with coal to make ingots.', 'Apples fall from oak leaves sometimes.', 'Sleep in a bed when it gets dark.',
+  'A House Seed grows a whole cottage!', 'Torches keep the caves bright.', 'Have you seen the big city to the east?',
+  'Gems hide deep underground.', 'Plant seeds on grass and watch them grow.',
+];
 
 const game = {
-  state: 'boot', world: null, player: null, entities: [], fx: new FX(), sound: Sound,
-  renderer: null, cine: null, parkour: null,
-  cam: { x: 0, y: 0, zoomMul: 1, targetZoomMul: 1, bs: 32 }, userZoom: 1,
-  time: 0.04, day: 1, clock: 0, dt: 0.016, slowMo: 0, acc: 0, lastT: 0,
-  weather: { rain: 0, target: 0, timer: 240 },
-  hotbar: [], sel: 0, wallMode: false, touchMode: 'mine',
-  target: null, mining: null, placeCd: 0, placeHeld: false, lastPlaceKey: null,
-  doorsOpen: new Set(), discovered: new Set(), spawnPoint: null,
-  shakeAmt: 0, cinematicAmt: 0, cinemaMode: false, hidePlayer: false, teleporting: false,
-  tick: { water: 0, grow: 0, ambient: 0, save: 0, zone: 0 },
-  DAY_LEN: 600,
+  state: 'boot', mode: null, world: null, player: null, r: null,
+  particles: new Particles(), sound: Sound, ui: UI,
+  cam: { yaw: 0, pitch: 0, view: 'first', dist: 4.5, eye: [0, 0, 0], fwd: [0, 0, -1] },
+  inv: new Array(36).fill(null), sel: 0, hp: 20, air: 10, time: 0.04, day: 1,
+  drops: [], animals: [], villagers: [], race: null, cup: null,
+  mining: null, swing: 0, placeCd: 0, mineCd: 0, target: null,
+  distLevel: 1, spawnPoint: null, hurtT: 9, regenT: 0, acc: 0, lastT: 0, slowMo: 0,
+  cinemaMode: false, shake: 0, tick: { water: 0, grow: 0, spawn: 0, save: 0 },
 
   boot() {
-    initBlocks();
-    this.renderer = new Renderer(document.getElementById('game'));
-    Input.init(this.renderer.canvas);
-    this.fx.onPop = () => this.sound.play('pop');
-    this.cine = new Cinema(this);
-    const st = Store.get('pixelrealms.settings', {});
+    initBlocks(); buildTables();
+    try { this.r = new Renderer3D(document.getElementById('game')); }
+    catch (e) { document.getElementById('nogl').hidden = false; document.getElementById('title-screen').hidden = true; console.error(e); return; }
+    if (Input.isTouch || window.matchMedia('(pointer: coarse)').matches) { this.r.maxDpr = 1.5; this.r.resize(); }
+    Input.init(this.r.canvas);
+    Input.onUnlock = () => { if ((this.state === 'play' || this.state === 'race') && !UI.open && !this.cinemaMode) UI.openPanel('pause'); };
+    UI.init(this);
+    const st = Store.get('pr3d.settings', {});
     if (st.sound === false) this.sound.setEnabled(false);
     if (st.music === false) this.sound.setMusic(false);
-    if (st.zoom) this.userZoom = clamp(st.zoom, 0.6, 1.8);
-    this.hotbar = DEFAULT_HOTBAR.map(k => B[k]);
-    UI.init(this);
-    this.showTitle(null);
-    document.addEventListener('visibilitychange', () => { if (document.hidden && (this.state === 'play' || this.state === 'menu')) this.saveNow(true); });
+    if (st.dist !== undefined) this.distLevel = st.dist;
+    else if (window.matchMedia('(pointer: coarse)').matches) this.distLevel = 0;
+    document.addEventListener('visibilitychange', () => { if (document.hidden) this.saveNow(true); });
+    this.showTitle();
     requestAnimationFrame(t => this.loop(t));
   },
-  saveSettings() { Store.set('pixelrealms.settings', { sound: this.sound.enabled, music: this.sound.musicOn, zoom: this.userZoom }); },
+  saveSettings() { Store.set('pr3d.settings', { sound: this.sound.enabled, music: this.sound.musicOn, dist: this.distLevel }); },
+  viewRadius() { return (Input.isTouch ? [3, 4, 6] : [4, 6, 8])[this.distLevel]; },
+  cycleDistance() { this.distLevel = (this.distLevel + 1) % 3; this.saveSettings(); },
 
-  // --- screens -------------------------------------------------------------------
-  showTitle(world) {
-    this.state = 'title';
-    if (!world) {
-      world = generateWorld(randomSeed());
-      this.setupWorld(world, null);
-    }
-    this.hidePlayer = true;
-    this.parkour.active = null;
-    UI.hideParkour();
-    this.cinemaMode = false; this.cine.bars(false);
-    const v = world.zones.find(z => z.type === 'village' && z.x0 > world.spawn.x);
-    this.titlePath = { x0: (v ? v.x0 : world.spawn.x) - 10, x1: world.spawn.x + 650 };
-    this.cam.x = this.titlePath.x0; this.cam.y = this.groundAt(this.cam.x) - 8; this.cam.zoomMul = 0.85;
-    this.time = 0.33;
+  // --- screens ---------------------------------------------------------------------
+  showTitle() {
+    this.state = 'title'; this.mode = 'title'; this.race = null; this.cup = null;
+    document.body.classList.remove('playing');
+    this.setupWorld('creative', randomSeed());
+    const reg = this.world.gen.regionInfo(0, 0);
+    this.titleCenter = [reg.cx + 0.5, reg.gy + 2, reg.cz + 0.5];
+    this.titleAngle = Math.random() * TAU;
+    this.time = 0.3;
+    this.cinemaMode = false;
+    this.bars(false);
+    UI.setMode('title');
     UI.showTitle();
   },
-
-  newWorld(seedStr) {
-    this.sound.init();
-    this.sound.play('click');
-    UI.showLoading(true);
-    this.state = 'loading';
-    setTimeout(() => {
-      const w = generateWorld(seedStr);
-      this.setupWorld(w, null);
-      this.hidePlayer = false;
-      UI.showLoading(false);
-      UI.hideTitle();
-      this.cine.fade(1, 0);
-      this.cine.playIntro();
-    }, 50);
+  setupWorld(mode, seed) {
+    if (this.world) for (const c of this.world.chunks.values()) this.r.freeChunk(c);
+    const w = new World(seed, mode, null);
+    w.gen = new Terrain(w.seed);
+    this.world = w;
+    this.drops = []; this.animals = []; this.villagers = []; this.particles.list.length = 0;
+    this.spawnedRegions = new Set();
+    const reg = w.gen.regionInfo(0, 0);
+    const sx = reg.cx - 34, sz = reg.cz;
+    w.spawn = { x: sx + 0.5, z: sz + 0.5, y: reg.gy };
+    this.player = new Body(w.spawn.x, w.spawn.y, w.spawn.z, 0.3, 1.75);
+    this.player.look = beanLook(new RNG(7), '#2fb4a4');
+    this.player.look.hat = 'none';
+    this.cam.yaw = -Math.PI / 2; this.cam.pitch = -0.1;
+    this.hp = 20; this.air = 10; this.day = 1; this.time = 0.04; this.spawnPoint = null;
+    this.inv = new Array(36).fill(null); this.sel = 0;
+    if (mode === 'creative') CREATIVE_BAR.forEach((k, i) => { this.inv[i] = { id: B[k], n: 1 }; });
+  },
+  loadAround(x, z, r) {
+    const cx = Math.floor(x / CS), cz = Math.floor(z / CS);
+    for (const [dx, dz, d2] of SPIRAL) { if (d2 > (r + 1) * (r + 1)) break; this.world.ensureChunk(cx + dx, cz + dz); }
+    for (const [dx, dz, d2] of SPIRAL) {
+      if (d2 > r * r) break;
+      const c = this.world.getChunk(cx + dx, cz + dz);
+      if (c) this.r.uploadChunk(c, buildChunkMesh(this.world, c));
+      this.world.dirty.delete(CK(cx + dx, cz + dz)); this.world.urgent.delete(CK(cx + dx, cz + dz));
+    }
   },
 
-  continueWorld() {
-    const data = Save.read();
+  newWorld(mode, seed) {
+    this.sound.init();
+    UI.showLoading(true, mode === 'survival' ? 'Growing trees and hiding ores…' : 'Building your world…');
+    this.state = 'loading';
+    setTimeout(() => {
+      this.mode = mode;
+      this.setupWorld(mode, seed);
+      const p = this.player;
+      this.loadAround(p.x, p.z, 3);
+      p.y = this.world.topY(Math.floor(p.x), Math.floor(p.z)) + 1;
+      UI.setMode(mode);
+      UI.refreshHotbar();
+      UI.showLoading(false);
+      UI.hideTitle();
+      this.startIntro();
+    }, 40);
+  },
+  continueWorld(mode) {
+    const data = Save.read(mode);
     if (!data) return;
     this.sound.init();
-    UI.showLoading(true);
+    UI.showLoading(true, 'Loading your world…');
     this.state = 'loading';
     setTimeout(() => {
-      const w = generateWorld(data.seed);
-      Save.apply(w, data);
-      this.setupWorld(w, data);
-      this.hidePlayer = false;
-      UI.showLoading(false);
-      UI.hideTitle();
-      this.cine.fade(1, 0);
-      setTimeout(() => this.cine.fade(0, 700), 50);
-      this.startPlaying(false);
-      this.cine.zoneTitle('Welcome back', `Day ${this.day} · Seed ${w.seedStr}`);
-    }, 50);
+      this.mode = mode;
+      this.setupWorld(mode, data.seed);
+      const map = Save.restore(this.world, data);
+      const p = this.player, d = data.player;
+      p.x = d.x; p.y = d.y; p.z = d.z; p.fly = !!d.fly;
+      this.cam.yaw = d.yaw || 0; this.cam.pitch = d.pitch || 0; this.cam.view = data.view || 'first';
+      this.hp = d.hp || 20; this.time = data.time || 0.1; this.day = data.day || 1;
+      this.spawnPoint = data.spawn || null; this.sel = data.sel || 0;
+      this.inv = (data.inv || []).map(s => (s && map[s[0]] ? { id: map[s[0]], n: s[1] } : null));
+      while (this.inv.length < 36) this.inv.push(null);
+      this.loadAround(p.x, p.z, 3);
+      UI.setMode(mode); UI.refreshHotbar();
+      UI.showLoading(false); UI.hideTitle();
+      this.fade(1, 0); setTimeout(() => this.fade(0, 600), 60);
+      this.startPlaying();
+      this.cineTitle('Welcome back', `Day ${this.day} · Seed ${data.seed}`);
+    }, 40);
   },
-
-  setupWorld(world, data) {
-    this.world = world;
-    this.fx.clear();
-    this.player = new Player(world.spawn.x, world.spawn.y);
-    this.parkour = new Parkour(this);
-    this.entities = [];
-    this.spawnCreatures();
-    this.time = 0.04; this.day = 1;
-    this.weather = { rain: 0, target: 0, timer: 240 + Math.random() * 120 };
-    this.discovered = new Set();
-    this.spawnPoint = null;
-    this.wallMode = false;
-    this.cinemaMode = false;
-    this.hotbar = DEFAULT_HOTBAR.map(k => B[k]);
-    this.sel = 0;
-    if (data) {
-      this.player.x = data.player.x; this.player.y = data.player.y; this.player.fly = !!data.player.fly;
-      this.time = data.time || 0.04; this.day = data.day || 1;
-      if (Array.isArray(data.hotbar)) data.hotbar.forEach((k, i) => { if (B[k] !== undefined && i < 9) this.hotbar[i] = B[k]; });
-      this.sel = clamp(data.sel || 0, 0, 8);
-      this.discovered = new Set(data.discovered || []);
-      this.spawnPoint = data.spawnPoint || null;
-    }
-    this.player.heldTi = BLOCKS[this.hotbar[this.sel]].iconTi;
-    this.cam.x = this.player.x; this.cam.y = this.player.y - 1.4; this.cam.zoomMul = 1; this.cam.targetZoomMul = 1;
-    UI.refreshHotbar(); UI.updateToggles(); UI.updateMenu();
-  },
-
-  spawnCreatures() {
-    const w = this.world, rng = new RNG(w.seed ^ 0x5eed);
-    for (const s of w.npcSpawns) {
-      if (s.kind === 'animal') this.entities.push(new Animal(Object.assign({}, s, { y: this.groundAt(s.x) })));
-      else this.entities.push(new NPC(s, rng));
-    }
-    for (const road of w.roads) for (let k = 0; k < 9; k++) this.entities.push(new Car(road, rng));
-  },
-
-  startPlaying(fresh) {
+  startPlaying() {
     this.state = 'play';
-    this.hidePlayer = false;
+    document.body.classList.add('playing');
     UI.showHUD(true);
-    this.tick.zone = 1;
-    if (fresh) {
-      const touch = Input.touch.isTouch;
-      setTimeout(() => UI.toast(touch ? 'Use ◀ ▶ to walk and ▲ to jump. Tap the world to dig.' : 'Walk with A and D, jump with Space. Left click digs, right click builds.'), 700);
-      setTimeout(() => UI.toast(touch ? 'Switch Dig / Build above the hotbar. Tap the bag for all blocks.' : 'Press E for every block, M for the map, and H for help.'), 4300);
-    }
+    this.bars(false);
+    Input.enabled = true;
   },
-
   quitToTitle() {
     this.saveNow(true);
-    this.cine.flash(() => this.showTitle(this.world), 400);
+    Input.releaseLock();
+    Input.enabled = false;
+    UI.closeResults();
+    this.fade(1, 300);
+    setTimeout(() => { this.showTitle(); this.fade(0, 500); }, 320);
   },
 
-  // --- main loop ---------------------------------------------------------------------
+  // --- cinematics ----------------------------------------------------------------------
+  bars(on) { document.getElementById('cine-bars').classList.toggle('on', on); },
+  fade(a, ms = 400) { const f = document.getElementById('fade'); f.style.transitionDuration = ms + 'ms'; f.style.opacity = a; },
+  flashFade() { this.fade(0.85, 80); setTimeout(() => this.fade(0, 350), 120); },
+  cineTitle(main, sub, cls = '', ms = 3800) {
+    const t = document.getElementById('cine-title');
+    clearTimeout(this.titleTimer);
+    t.className = cls;
+    t.querySelector('.cine-main').textContent = main;
+    t.querySelector('.cine-sub').textContent = sub || '';
+    void t.offsetWidth; t.classList.add('show');
+    this.titleTimer = setTimeout(() => t.classList.remove('show'), ms);
+  },
+  startIntro() {
+    const reg = this.world.gen.regionInfo(0, 0), p = this.player;
+    const c = [reg.cx + 0.5, reg.gy + 2, reg.cz + 0.5];
+    const eye = [p.x, p.y + 1.55, p.z];
+    this.intro = {
+      t: 0, shot: 0,
+      shots: [
+        { dur: 6.5, path: u => { const a = 0.4 + u * 1.4, R = 40 - u * 8; return { eye: [c[0] + Math.cos(a) * R, c[1] + 22 - u * 6, c[2] + Math.sin(a) * R], look: c }; }, main: 'PIXEL REALMS', sub: this.mode === 'survival' ? 'Survival · mine, craft, build' : 'Creative · build anything', cls: 'logo' },
+        { dur: 4.2, path: u => { const k = easeInOut(u); const s = [c[0] - 6, c[1] + 16, c[2] + 26]; return { eye: [lerp(s[0], eye[0], k), lerp(s[1], eye[1], k), lerp(s[2], eye[2], k)], look: [lerp(c[0], eye[0] - 10, k), lerp(c[1], eye[1] - 0.6, k), lerp(c[2], eye[2], k)] }; }, main: `Seed: ${this.world.seedStr}`, sub: 'Your adventure begins' },
+      ],
+    };
+    this.state = 'intro';
+    this.bars(true);
+    UI.showHUD(false);
+    this.fade(0, 600);
+    this.cineTitle(this.intro.shots[0].main, this.intro.shots[0].sub, 'logo', 5600);
+    this.sound.play('discover');
+  },
+  updateIntro(dt) {
+    const I = this.intro;
+    I.t += dt;
+    let s = I.shots[I.shot];
+    if (I.t >= s.dur) {
+      I.shot++; I.t = 0;
+      if (I.shot >= I.shots.length) { this.endIntro(); return; }
+      s = I.shots[I.shot];
+      this.cineTitle(s.main, s.sub, s.cls || '', s.dur * 1000 - 500);
+    }
+    const { eye, look } = s.path(clamp(I.t / s.dur, 0, 1));
+    this.cam.eye = eye;
+    const dx = look[0] - eye[0], dy = look[1] - eye[1], dz = look[2] - eye[2];
+    this.cam.yawI = Math.atan2(-dx, -dz); this.cam.pitchI = Math.atan2(dy, Math.hypot(dx, dz));
+    this.time = (0.965 + 0.075 * clamp(((I.shot ? I.shots[0].dur : 0) + I.t) / 10.7, 0, 1)) % 1;
+  },
+  skipIntro() { if (this.state === 'intro') { this.fade(1, 150); setTimeout(() => { this.endIntro(); this.fade(0, 400); }, 160); } },
+  endIntro() {
+    if (this.state !== 'intro') return;
+    this.intro = null;
+    this.time = 0.04;
+    document.getElementById('cine-title').classList.remove('show');
+    this.startPlaying();
+    const touch = Input.isTouch;
+    if (this.mode === 'survival') {
+      setTimeout(() => UI.toast(touch ? 'Hold the pickaxe button on a tree to collect wood.' : 'Click to look around. Hold left click on a tree to collect wood.'), 600);
+      setTimeout(() => UI.toast('Open Inventory (E) to make planks, sticks and a pickaxe.'), 4400);
+    } else {
+      setTimeout(() => UI.toast(touch ? 'Tap to place blocks, hold to break them.' : 'Click to look around. Left click breaks, right click places.'), 600);
+      setTimeout(() => UI.toast('Press E for every block. Press F to fly.'), 4400);
+    }
+  },
+  setCinema(on) {
+    this.cinemaMode = on;
+    this.bars(on);
+    UI.showHUD(!on);
+    if (on) { this.prevView = this.cam.view; this.cam.view = 'third'; UI.toast('Cinematic camera. Press C or Esc to exit.'); }
+    else if (this.prevView) this.cam.view = this.prevView;
+  },
+
+  // --- main loop -----------------------------------------------------------------------
   loop(now) {
     const dt = Math.min(0.1, (now - (this.lastT || now)) / 1000);
     this.lastT = now;
     this.dt = dt;
-    const running = this.state === 'play' || this.state === 'intro' || this.state === 'title';
-    if (running && this.world) {
+    Input.update();
+    const running = ['play', 'intro', 'title', 'race'].includes(this.state);
+    if (running) {
       if (this.slowMo > 0) this.slowMo -= dt;
-      this.acc += dt * (this.slowMo > 0 ? 0.45 : 1);
-      let steps = 0;
-      while (this.acc >= STEP && steps < 6) { this.update(STEP); this.acc -= STEP; steps++; }
-      if (steps >= 6) this.acc = 0;
-      if (steps > 0) Input.endFrame();
+      this.acc += dt * (this.slowMo > 0 ? 0.4 : 1);
+      let n = 0;
+      while (this.acc >= STEP && n < 5) { this.update(STEP); this.acc -= STEP; n++; }
+      if (n >= 5) this.acc = 0;
+      if (n) Input.endFrame();
     } else {
       this.menuKeys();
       Input.endFrame();
     }
-    if (this.world) {
+    if (this.world && this.state !== 'boot') {
+      this.stream(this.state === 'loading' ? 30 : 7);
       this.updateCamera(dt);
-      this.renderer.render(this);
+      this.render();
       UI.updateHUD(dt);
     }
     this.sound.musicTick();
     requestAnimationFrame(t => this.loop(t));
   },
 
+  stream(budget) {
+    const w = this.world;
+    if (this.mode === 'parkour') {
+      const t0 = performance.now();
+      for (const k of [...w.urgent, ...w.dirty]) {
+        const c = w.chunks.get(k);
+        w.urgent.delete(k); w.dirty.delete(k);
+        if (c) this.r.uploadChunk(c, buildChunkMesh(w, c));
+        if (performance.now() - t0 > budget) break;
+      }
+      return;
+    }
+    const t0 = performance.now();
+    const fx = this.state === 'title' ? this.titleCenter[0] : this.player.x, fz = this.state === 'title' ? this.titleCenter[2] : this.player.z;
+    const R = this.state === 'title' ? 4 : this.viewRadius();
+    const cx = Math.floor(fx / CS), cz = Math.floor(fz / CS);
+    // urgent remeshes (block edits) first
+    for (const k of w.urgent) {
+      const c = w.chunks.get(k);
+      w.urgent.delete(k); w.dirty.delete(k);
+      if (c) this.r.uploadChunk(c, buildChunkMesh(w, c));
+      if (performance.now() - t0 > budget * 0.6) break;
+    }
+    for (const [dx, dz, d2] of SPIRAL) {
+      if (d2 > (R + 1) * (R + 1) || performance.now() - t0 > budget) break;
+      const k = CK(cx + dx, cz + dz);
+      if (!w.chunks.has(k)) { w.ensureChunk(cx + dx, cz + dz); continue; }
+      if (d2 <= R * R && w.dirty.has(k)) {
+        // only mesh when the neighbours exist, so the borders are right
+        if ([[1, 0], [-1, 0], [0, 1], [0, -1]].every(([a, b]) => w.chunks.has(CK(cx + dx + a, cz + dz + b)))) {
+          w.dirty.delete(k);
+          this.r.uploadChunk(w.chunks.get(k), buildChunkMesh(w, w.chunks.get(k)));
+        }
+      }
+    }
+    // unload far chunks
+    if (Math.random() < 0.05) {
+      for (const c of [...w.chunks.values()]) {
+        if (Math.abs(c.cx - cx) > R + 3 || Math.abs(c.cz - cz) > R + 3) { this.r.freeChunk(c); w.unload(c.cx, c.cz); }
+      }
+    }
+  },
+
   update(dt) {
-    const w = this.world, p = this.player;
-    this.clock += dt;
+    const w = this.world;
     w.clock += dt;
-    w.focusX = this.state === 'title' ? this.cam.x : p.x;
-    if (this.state === 'play') this.time += dt / this.DAY_LEN;
-    else if (this.state === 'title') this.time += dt / 110;
-    if (this.time >= 1) { this.time -= 1; this.day++; }
-    this.updateWeather(dt);
-    this.sound.night = this.isNight();
-
-    if (UI.open) this.menuKeys();
-    else if (this.state === 'play') this.keys();
+    if (this.state === 'title') {
+      this.titleAngle += dt * 0.06;
+      this.time += dt / 140;
+      if (this.time >= 1) this.time -= 1;
+      for (const a of this.animals) a.update(dt, w, this);
+      return;
+    }
+    if (this.mode === 'parkour') { this.updateRace(dt); return; }
     if (this.state === 'intro') {
-      if (Input.was('Escape', 'Space', 'Enter')) this.cine.skipIntro();
-      this.cine.updateIntro(dt);
+      this.updateIntro(dt);
+      if (Input.was('Escape', 'Space', 'Enter') || Input.mouse.leftPress || Input.tapPlace) this.skipIntro();
     }
-    if (this.state !== 'title' && !this.teleporting) {
-      p.update(dt, this.state === 'play' ? Input.state() : NO_INPUT, w, this);
-      this.parkour.update(dt);
-    }
-    const cx = this.cam.x;
-    for (const e of this.entities) if (Math.abs(e.x - cx) < 110) e.update(dt, w, this);
-
-    this.tick.water += dt;
-    if (this.tick.water >= 1 / 12) { w.waterStep(); this.tick.water = 0; }
-    this.tick.grow += dt;
-    if (this.tick.grow >= 0.5) { w.growStep(this.tick.grow, { night: this.isNight(), rain: this.weather.rain > 0.5 }); this.tick.grow = 0; }
-    w.timerStep(dt, (x, y) => this.occupied(x, y));
-    w.jobStep(dt);
-    this.worldEvents();
-    this.fx.update(dt, w);
+    if (this.state === 'play') { this.time += dt / DAY_LEN; if (this.time >= 1) { this.time -= 1; this.day++; } }
+    this.sound.night = this.isNight();
+    if (this.state === 'play') this.keys();
+    this.updatePlayer(dt);
     if (this.state === 'play') this.interact(dt);
-    this.updateDoors();
-    this.tick.ambient += dt;
-    if (this.tick.ambient >= 0.4) { this.ambient(); this.tick.ambient = 0; }
-    if (this.state === 'play') {
-      this.tick.zone += dt;
-      if (this.tick.zone >= 0.5) { this.checkZone(); this.tick.zone = 0; }
-      this.tick.save += dt;
-      if (this.tick.save >= 60) { this.saveNow(true); this.tick.save = 0; }
-    }
-    this.shakeAmt = Math.max(0, this.shakeAmt - dt * 1.6);
+    this.tick.water += dt;
+    if (this.tick.water > 0.2) { this.tick.water = 0; w.waterStep(); }
+    this.tick.grow += dt;
+    if (this.tick.grow > 1) { w.growStep(this.tick.grow, { night: this.isNight() }); this.tick.grow = 0; }
+    w.jobStep(dt);
+    w.timerStep(dt, (x, y, z) => this.occupied(x, y, z));
+    this.worldEvents();
+    for (const d of this.drops) d.update(dt, w, this);
+    this.drops = this.drops.filter(d => !d.dead);
+    for (const a of this.animals) a.update(dt, w, this);
+    for (const v of this.villagers) this.updateVillager(v, dt);
+    this.particles.update(dt, w);
+    this.tick.spawn += dt;
+    if (this.tick.spawn > 2) { this.tick.spawn = 0; this.spawnLife(); }
+    this.tick.save += dt;
+    if (this.tick.save > 60 && this.state === 'play') { this.tick.save = 0; this.saveNow(true); }
+    this.shake = Math.max(0, this.shake - dt * 2);
   },
 
-  updateCamera(dt) {
-    const cam = this.cam, w = this.world;
-    const base = clamp(Math.min(window.innerWidth / (16 * 44), window.innerHeight / (16 * 26)), 1, 3.2);
-    if (this.state === 'play' || this.state === 'menu' || this.state === 'loading') {
-      const p = this.player;
-      const tx = p.x + clamp(p.vx, -12, 12) * 0.22;
-      const ty = p.y - 1.4 + (p.vy > 10 ? Math.min(4, (p.vy - 10) * 0.25) : 0);
-      const k = 1 - Math.exp(-dt * (this.cinemaMode ? 2.2 : 6.5));
-      const ky = 1 - Math.exp(-dt * (this.cinemaMode ? 2 : 5));
-      cam.x += (tx - cam.x) * k; cam.y += (ty - cam.y) * ky;
-      const zt = this.cinemaMode ? 1.2 : cam.targetZoomMul;
-      cam.zoomMul += (zt - cam.zoomMul) * (1 - Math.exp(-dt * 3));
-    } else if (this.state === 'title' && this.titlePath) {
-      cam.x += dt * 3.4;
-      if (cam.x > this.titlePath.x1) cam.x = this.titlePath.x0;
-      const gy = this.groundAt(cam.x) - 7;
-      cam.y += (gy - cam.y) * (1 - Math.exp(-dt * 0.8));
-    }
-    cam.bs = 16 * base * this.userZoom * cam.zoomMul * this.renderer.dpr;
-    const halfW = this.renderer.W / cam.bs / 2, halfH = this.renderer.H / cam.bs / 2;
-    cam.x = clamp(cam.x, halfW, w.W - halfW);
-    cam.y = clamp(cam.y, halfH, w.H - halfH);
-    const want = this.cinemaMode || this.state === 'intro' ? 1 : 0;
-    this.cinematicAmt += (want - this.cinematicAmt) * (1 - Math.exp(-dt * 3));
-  },
-
-  // --- keys ------------------------------------------------------------------------
   keys() {
     if (Input.was('Escape')) { if (this.cinemaMode) this.setCinema(false); else UI.openPanel('pause'); return; }
-    if (Input.was('KeyE', 'KeyI', 'KeyB')) { UI.openPanel('inv'); return; }
-    if (Input.was('KeyM')) { UI.openPanel('map'); return; }
+    if (Input.was('KeyE', 'KeyI')) { UI.openPanel('inv'); return; }
     if (Input.was('KeyH', 'F1')) { UI.openPanel('help'); return; }
     if (Input.was('KeyF')) this.toggleFly();
-    if (Input.was('Tab')) this.toggleWall();
+    if (Input.was('KeyV', 'F5')) this.toggleView();
     if (Input.was('KeyC')) this.setCinema(!this.cinemaMode);
-    if (Input.was('KeyR')) this.retry();
-    for (let i = 1; i <= 9; i++) if (Input.was('Digit' + i, 'Numpad' + i)) this.selectSlot(i - 1);
+    for (let i = 1; i <= 9; i++) if (Input.was('Digit' + i)) this.selectSlot(i - 1);
     if (Input.mouse.wheel) this.selectSlot((this.sel + Input.mouse.wheel + 9) % 9);
-    if (Input.was('Equal', 'NumpadAdd', 'ZoomIn')) this.zoom(1.12);
-    if (Input.was('Minus', 'NumpadSubtract', 'ZoomOut')) this.zoom(1 / 1.12);
-    if (Input.was('MousePick')) this.pickBlock();
+    if (Input.was('MousePick') && this.target && this.mode === 'creative') {
+      let id = this.world.get(this.target.x, this.target.y, this.target.z);
+      if (id === B.door_top) id = B.door;
+      if (id && BLOCKS[id].cat !== 'hidden') this.setHotbarItem(this.sel, id);
+    }
   },
   menuKeys() {
     if (!UI.open) return;
-    if (Input.was('Escape')) UI.closePanels();
-    else if (Input.was('KeyE') && UI.open === 'inv' && document.activeElement !== UI.el.search) UI.closePanels();
-    else if (Input.was('KeyM') && UI.open === 'map') UI.closePanels();
-    else if (Input.was('KeyH') && UI.open === 'help') UI.closePanels();
+    if (Input.was('Escape') && UI.open !== 'results') UI.closePanels();
+    else if (Input.was('KeyE') && UI.open === 'inv' && document.activeElement !== document.getElementById('pick-search')) UI.closePanels();
   },
 
-  // --- interaction ----------------------------------------------------------------------
+  // --- player ----------------------------------------------------------------------------
+  wish(inp) {
+    const y = this.cam.yaw, s = Math.sin(y), c = Math.cos(y);
+    let mx = -s * inp.mz + c * inp.mx, mz = -c * inp.mz - s * inp.mx;
+    const l = Math.hypot(mx, mz);
+    if (l > 1) { mx /= l; mz /= l; }
+    return { mx, mz };
+  },
+  updatePlayer(dt) {
+    const p = this.player, w = this.world;
+    if (!w.isLoaded(Math.floor(p.x), Math.floor(p.z))) return;
+    const inp = this.state === 'play' && !UI.open ? Input.state() : { mx: 0, mz: 0 };
+    const v = this.wish(inp);
+    const P = { speed: 4.3, sprint: 6.2, jump: 8.8, accel: 12, air: 3, fly: p.fly };
+    const env = {
+      onLand: (b, fall) => {
+        if (fall > 1) this.sound.play('land', { vol: Math.min(1, fall / 8) });
+        if (this.mode === 'survival' && fall > 3.6 && !b.inWater) this.hurt(Math.floor(fall - 3), 'You fell from too high.');
+      },
+      onJump: () => this.sound.play('jump'),
+      onBounce: () => this.sound.play('bounce'),
+      onHurt: (b, n, why) => { if (this.mode === 'survival' && this.hurtT > 0.6) this.hurt(n, 'A cactus poked you.'); },
+    };
+    controlBody(p, { mx: v.mx, mz: v.mz, jump: inp.jump, jumpHeld: inp.jumpHeld, sprint: inp.sprint, down: inp.down, up: inp.up }, P, w, dt, env);
+    p.yawVis = this.cam.yaw;
+    if (p.onGround && Math.hypot(p.vx, p.vz) > 1.5 && Math.floor(p.walk * 1.3) !== Math.floor((p.walk - Math.hypot(p.vx, p.vz) * dt * 2.2) * 1.3)) this.sound.play('step', { block: w.get(p.gx, p.gy, p.gz) });
+    if (p.y < -20) { p.y = w.topY(Math.floor(p.x), Math.floor(p.z)) + 2; p.vy = 0; if (this.mode === 'survival') this.hurt(6, 'You fell out of the world.'); }
+    // survival rules
+    this.hurtT += dt;
+    if (this.mode === 'survival') {
+      if (p.headInWater) { this.air -= dt * 0.7; if (this.air < 0) { this.air = 0; this.drownT = (this.drownT || 0) + dt; if (this.drownT > 1) { this.drownT = 0; this.hurt(2, 'You ran out of air.'); } } }
+      else this.air = Math.min(10, this.air + dt * 4);
+      if (overlapsBlock(p, w, id => id === B.lava) && this.hurtT > 0.5) this.hurt(4, 'Lava is very hot.');
+      if (this.hp < 20 && this.hurtT > 5) { this.regenT += dt; if (this.regenT > 3) { this.regenT = 0; this.hp++; } }
+    } else { this.hp = 20; this.air = 10; }
+    if (p.inWater && !this.wasWater && Math.abs(p.vy) > 3) { this.sound.play('splash'); this.particles.burst(p.x, p.y + 0.6, p.z, [0.6, 0.8, 1], 12, 3); }
+    this.wasWater = p.inWater;
+    this.swing = Math.max(0, this.swing - dt * 3);
+  },
+  hurt(n, cause) {
+    if (this.mode !== 'survival' || this.state !== 'play' || this.hp <= 0) return;
+    this.hp = Math.max(0, this.hp - n); this.hurtT = 0; this.regenT = 0;
+    UI.hurtFlash(); this.sound.play('hurt'); this.shake = 0.3;
+    if (this.hp <= 0) {
+      this.state = 'dead';
+      Input.releaseLock();
+      UI.showDeath(cause);
+    }
+  },
+  respawn() {
+    UI.hideDeath();
+    const s = this.spawnPoint || this.world.spawn, p = this.player;
+    p.x = s.x; p.z = s.z; p.vx = p.vy = p.vz = 0;
+    this.loadAround(p.x, p.z, 2);
+    p.y = this.world.topY(Math.floor(p.x), Math.floor(p.z)) + 1;
+    p.maxY = p.y;
+    this.hp = 20; this.air = 10;
+    this.state = 'play';
+    this.fade(1, 0); setTimeout(() => this.fade(0, 500), 50);
+  },
+
+  // --- camera ----------------------------------------------------------------------------
+  updateCamera(dt) {
+    const cam = this.cam, p = this.player;
+    if (this.state === 'title') {
+      const c = this.titleCenter, a = this.titleAngle, R = 44;
+      cam.eye = [c[0] + Math.cos(a) * R, c[1] + 20, c[2] + Math.sin(a) * R];
+      cam.yawI = Math.atan2(-(c[0] - cam.eye[0]), -(c[2] - cam.eye[2]));
+      cam.pitchI = Math.atan2(c[1] - cam.eye[1], R);
+      return;
+    }
+    if (this.state === 'intro' || (this.mode === 'parkour' && this.race && this.race.camOverride)) return;
+    if (this.state === 'play' || this.state === 'race' || this.state === 'dead') {
+      const [dx, dy] = Input.takeLook();
+      const sens = Input.isTouch ? 0.0042 : 0.0025;
+      cam.yaw -= dx * sens; cam.pitch = clamp(cam.pitch - dy * sens, -1.5, 1.5);
+    } else Input.takeLook();
+    cam.yawI = cam.yaw; cam.pitchI = cam.pitch;
+    const third = this.mode === 'parkour' || cam.view === 'third' || this.cinemaMode;
+    const head = [p.x, p.y + (third ? 1.35 : 1.58), p.z];
+    if (!third) {
+      const bob = p.onGround ? Math.sin(p.walk * 3.2) * 0.04 * Math.min(1, Math.hypot(p.vx, p.vz) / 4) : 0;
+      cam.eye = [head[0], head[1] + bob, head[2]];
+    } else {
+      const f = forwardVec(cam.yaw, cam.pitch);
+      let dist = this.mode === 'parkour' ? 6 : (this.cinemaMode ? 6.5 : cam.dist);
+      // pull the camera in front of walls
+      for (let d = 0.3; d < dist; d += 0.25) {
+        if (OPAQUE[this.world.get(Math.floor(head[0] - f[0] * d), Math.floor(head[1] - f[1] * d), Math.floor(head[2] - f[2] * d))]) { dist = Math.max(0.6, d - 0.3); break; }
+      }
+      const target = [head[0] - f[0] * dist, head[1] - f[1] * dist, head[2] - f[2] * dist];
+      const k = 1 - Math.exp(-dt * (this.cinemaMode ? 3 : 18));
+      cam.eye = cam.eye.map((v, i) => (Math.abs(v - target[i]) > 8 ? target[i] : v + (target[i] - v) * k));
+    }
+    if (this.shake > 0 && !REDUCED_MOTION) cam.eye = cam.eye.map(v => v + (Math.random() - 0.5) * this.shake * 0.3);
+  },
+  toggleView() {
+    if (this.mode === 'parkour') return;
+    this.cam.view = this.cam.view === 'first' ? 'third' : 'first';
+    UI.toast(this.cam.view === 'first' ? 'First person view' : 'Third person view');
+  },
+  toggleFly() {
+    if (this.mode !== 'creative') { if (this.mode === 'survival') UI.toast('Flying is only in Creative.'); return; }
+    this.player.fly = !this.player.fly;
+    UI.toast(this.player.fly ? 'Flying: Space to rise, Shift to sink.' : 'Flying off.');
+  },
+
+  // --- blocks: aim, mine, place ----------------------------------------------------------------
+  raycast(maxD, withWater) {
+    const w = this.world, eye = this.cam.eye, f = forwardVec(this.cam.yawI, this.cam.pitchI);
+    let x = Math.floor(eye[0]), y = Math.floor(eye[1]), z = Math.floor(eye[2]);
+    const sx = Math.sign(f[0]), sy = Math.sign(f[1]), sz = Math.sign(f[2]);
+    const tdx = Math.abs(1 / f[0]), tdy = Math.abs(1 / f[1]), tdz = Math.abs(1 / f[2]);
+    let tx = sx > 0 ? (x + 1 - eye[0]) * tdx : (eye[0] - x) * tdx;
+    let ty = sy > 0 ? (y + 1 - eye[1]) * tdy : (eye[1] - y) * tdy;
+    let tz = sz > 0 ? (z + 1 - eye[2]) * tdz : (eye[2] - z) * tdz;
+    let nx = 0, ny = 0, nz = 0, t = 0;
+    for (let i = 0; i < 64 && t <= maxD; i++) {
+      const id = w.get(x, y, z);
+      if (id && (id !== B.water || (withWater && w.getMeta(x, y, z) === 0)) && id !== B.gate) return { x, y, z, nx, ny, nz, id, t };
+      if (tx < ty && tx < tz) { x += sx; t = tx; tx += tdx; nx = -sx; ny = 0; nz = 0; }
+      else if (ty < tz) { y += sy; t = ty; ty += tdy; nx = 0; ny = -sy; nz = 0; }
+      else { z += sz; t = tz; tz += tdz; nx = 0; ny = 0; nz = -sz; }
+    }
+    return null;
+  },
+  reach() { return (this.mode === 'creative' ? 7 : 5) + (this.cam.view === 'third' ? this.cam.dist : 0); },
   interact(dt) {
-    const m = Input.mouse, t = Input.touch, w = this.world, p = this.player;
-    this.placeCd -= dt;
-    const touch = t.isTouch;
-    if (!m.inside || (touch && !t.world && !t.worldPressed)) { this.target = null; this.mining = null; this.placeHeld = false; return; }
-    const wp = this.renderer.toWorld(m.x, m.y);
-    const tx = Math.floor(wp.x), ty = Math.floor(wp.y);
-    const dist = Math.hypot(tx + 0.5 - p.x, ty + 0.5 - (p.y - 0.9));
-    const ok = dist <= REACH && w.inb(tx, ty);
-    const item = this.hotbar[this.sel], d = BLOCKS[item];
-    const cur = w.get(tx, ty);
-    const empty = this.wallMode ? w.getBg(tx, ty) === 0 && !BLOCKS[cur].opaque : (cur === B.air || BLOCKS[cur].replaceable || (cur === B.water && !d.liquid));
-    const preview = empty && !d.item && !d.liquid ? d.ti[0] : -1;
-    this.target = { x: tx, y: ty, ok, preview };
-    const wantMine = touch ? this.touchMode === 'mine' : (m.left || m.leftPress);
-    const wantPlace = touch ? this.touchMode === 'build' : (m.right || m.rightPress);
-    if (wantMine && ok) this.mineStep(tx, ty, dt); else this.mining = null;
-    if (wantPlace && ok) {
-      const key = tx + ',' + ty;
-      const fresh = !this.placeHeld;
-      if (fresh || (key !== this.lastPlaceKey && this.placeCd <= 0)) { this.useAt(tx, ty, fresh); this.placeCd = 0.08; this.lastPlaceKey = key; }
-      this.placeHeld = true;
-    } else { this.placeHeld = false; this.lastPlaceKey = null; }
+    if (UI.open || this.cinemaMode) { this.mining = null; this.target = null; return; }
+    const hit = this.raycast(this.reach());
+    this.target = hit;
+    this.placeCd -= dt; this.mineCd -= dt;
+    const mineHeld = Input.mouse.left || Input.holdMine;
+    if (mineHeld && hit) this.mineStep(hit, dt, Input.mouse.leftPress);
+    else this.mining = null;
+    const placeNow = Input.mouse.rightPress || Input.tapPlace || (Input.mouse.right && this.placeCd <= 0);
+    if (placeNow) { this.placeCd = 0.22; this.useItem(hit); }
   },
-
-  mineStep(tx, ty, dt) {
-    const w = this.world, p = this.player;
-    let id = w.get(tx, ty), layer = 'fg';
-    if (this.wallMode || id === B.air) {
-      const b = w.getBg(tx, ty);
-      if (b && !BLOCKS[id].opaque && (this.wallMode || id === B.air)) { layer = 'bg'; id = b; }
-      else { this.mining = null; return; }
-    }
-    if (layer === 'fg' && id === B.water) {
-      w.set(tx, ty, B.air);
-      this.fx.splash(tx + 0.5, ty + 0.5); this.sound.play('splash');
-      return;
-    }
+  heldTool() { const s = this.slot(this.sel); return s && BLOCKS[s.id].toolKind ? BLOCKS[s.id] : null; },
+  mineTime(id) {
     const d = BLOCKS[id];
-    if (d.hardness === Infinity) {
-      if (!this.mining || this.mining.x !== tx || this.mining.y !== ty) UI.toast('Bedrock can’t be broken.');
-      this.mining = { x: tx, y: ty, layer, progress: 0, id };
-      return;
-    }
-    if (!this.mining || this.mining.x !== tx || this.mining.y !== ty || this.mining.layer !== layer) this.mining = { x: tx, y: ty, layer, progress: 0, id };
-    this.mining.progress += dt / Math.max(0.04, d.hardness);
-    p.mineT = 0.25;
-    p.facing = tx + 0.5 > p.x ? 1 : -1;
-    if (Math.random() < 0.25) { this.sound.play('dig', { block: id }); this.fx.debris(tx, ty, id, 1); }
-    if (this.mining.progress >= 1) { this.breakBlock(tx, ty, layer); this.mining = null; }
+    if (d.hardness === Infinity) return { time: Infinity, drop: false };
+    if (this.mode === 'creative') return { time: 0, drop: false };
+    const t = this.heldTool();
+    let time = d.hardness, drop = true;
+    const right = t && d.tool && t.toolKind === d.tool;
+    if (d.tool === 'pick' && d.tier > 0 && (!right || t.toolTier < d.tier)) { time *= 4; drop = false; }
+    else if (right) time /= t.toolSpeed;
+    else if (d.tool) time *= 1.6;
+    return { time: Math.max(0.05, time), drop };
   },
-
-  breakBlock(tx, ty, layer) {
-    const w = this.world;
-    if (layer === 'bg') {
-      const id = w.getBg(tx, ty);
-      w.setBg(tx, ty, 0);
-      this.fx.debris(tx, ty, id, 6); this.sound.play('break', { block: id });
-      return;
-    }
-    const id = w.get(tx, ty), d = BLOCKS[id], m = w.getMeta(tx, ty);
-    w.set(tx, ty, B.air);
-    this.fx.debris(tx, ty, id, 10);
+  mineStep(hit, dt, fresh) {
+    const w = this.world, id = hit.id;
+    const m = this.mining;
+    if (!m || m.x !== hit.x || m.y !== hit.y || m.z !== hit.z) this.mining = { x: hit.x, y: hit.y, z: hit.z, p: 0 };
+    const mt = this.mineTime(id);
+    if (mt.time === Infinity) { if (fresh) UI.toast('That block can’t be broken.'); return; }
+    this.swing = 1;
+    if (mt.time === 0) { if (fresh || this.mineCd <= 0) { this.breakBlock(hit, false); this.mineCd = 0.2; } return; }
+    this.mining.p += dt / mt.time;
+    if (Math.random() < 0.25) { this.sound.play('dig', { block: id }); this.particles.burst(hit.x + 0.5 + hit.nx * 0.5, hit.y + 0.5 + hit.ny * 0.5, hit.z + 0.5 + hit.nz * 0.5, BLOCKS[id].color, 2, 1.5, 0.08); }
+    if (this.mining.p >= 1) { this.breakBlock(hit, mt.drop); this.mining = null; }
+  },
+  breakBlock(hit, drop) {
+    const w = this.world, id = w.get(hit.x, hit.y, hit.z), meta = w.getMeta(hit.x, hit.y, hit.z);
+    w.set(hit.x, hit.y, hit.z, 0, 0, { quiet: true });
+    this.particles.blockBreak(hit.x, hit.y, hit.z, id);
     this.sound.play('break', { block: id });
-    if (d.plant && d.plant.stages > 1 && m >= d.plant.stages - 1 && d.plant.final === 'stay') {
-      this.fx.text(tx + 0.5, ty, '+1 ' + d.name.replace(' Seeds', ''), '#fff6a0');
-      this.fx.sparkle(tx, ty, 6);
-    }
+    if (drop) for (const [did, n] of this.dropsFor(id, meta)) this.drops.push(new ItemDrop(hit.x + 0.5, hit.y + 0.4, hit.z + 0.5, did, n));
   },
-
-  useAt(tx, ty, fresh) {
-    const w = this.world, p = this.player;
-    const item = this.hotbar[this.sel], d = BLOCKS[item];
-    const cur = w.get(tx, ty), cd = BLOCKS[cur];
-    if (fresh && !this.wallMode) {
-      if (cd.bed) { this.useBed(tx, ty); return; }
-      if (cd.boom) { w.ignite(tx, ty); UI.toast('Boom Block lit! Stand back.'); return; }
+  dropsFor(id, meta) {
+    const d = BLOCKS[id], out = [];
+    if (d.leaves) {
+      if (d.sapling && Math.random() < 0.07) out.push([B[d.sapling], 1]);
+      if (id === B.leaves_oak && Math.random() < 0.05) out.push([B.apple, 1]);
+      return out;
     }
-    if (item === B.fertilizer) { if (fresh) this.fertilize(tx, ty); return; }
-    if (this.wallMode) {
-      if (!(d.render === 'tile' || d.render === 'anim') || !d.solid || d.platform || d.plant || d.item || d.liquid || d.door) {
-        if (fresh) UI.toast('Only full blocks can be used as back walls.');
+    if (id === B.tallgrass) { if (Math.random() < 0.18) out.push([B.seeds, 1]); return out; }
+    if (id === B.wheat) { if (meta >= 3) { out.push([B.wheat_item, 1]); out.push([B.seeds, 1 + (Math.random() < 0.5 ? 1 : 0)]); } else out.push([B.seeds, 1]); return out; }
+    if (d.dropId >= 0) out.push([d.dropId, 1]);
+    return out;
+  },
+  useItem(hit) {
+    const w = this.world, s = this.slot(this.sel), d = s ? BLOCKS[s.id] : null;
+    const sneak = Input.down('ShiftLeft', 'ShiftRight');
+    if (hit && !sneak) {
+      const tid = hit.id, td = BLOCKS[tid];
+      if (td.bed) { this.useBed(hit); return; }
+      if (tid === B.door || tid === B.door_top) {
+        const by = tid === B.door ? hit.y : hit.y - 1;
+        const m = w.getMeta(hit.x, by, hit.z) ^ 4;
+        w.set(hit.x, by, hit.z, B.door, m, { quiet: true }); w.set(hit.x, by + 1, hit.z, B.door_top, m, { quiet: true });
+        this.sound.play(m & 4 ? 'open' : 'close');
         return;
       }
-      if (w.getBg(tx, ty) || cd.opaque) return;
-      w.setBg(tx, ty, item);
-      this.sound.play('place', { block: item }); p.placeT = 0.15;
+      if (td.boom) { w.ignite(hit.x, hit.y, hit.z); UI.toast('Boom Block lit! Run!'); return; }
+      if (tid === B.workbench && this.mode === 'survival') { UI.openPanel('inv'); return; }
+    }
+    if (!s) return;
+    if (d.food) {
+      if (this.mode === 'survival' && this.hp < 20) { this.hp = Math.min(20, this.hp + d.food); this.consume(1); this.sound.play('eat'); this.swing = 1; }
+      else UI.toast('You are already at full health.');
       return;
     }
-    if (d.liquid) {
-      if (w.addWater(tx, ty)) { this.sound.play('splash'); this.fx.splash(tx + 0.5, ty + 0.8); p.placeT = 0.15; }
-      return;
-    }
-    if (!(cur === B.air || cd.replaceable || cur === B.water)) return;
-    if (d.plant) {
-      if (cur === B.water) { if (fresh) UI.toast('Plants can’t grow underwater.'); return; }
-      if (!plantSupported(item, w.get(tx, ty + 1))) { if (fresh) { UI.toast(soilHint(d)); this.sound.play('error'); } return; }
-    }
-    if (d.door) {
-      const above = w.get(tx, ty - 1);
-      if (!(above === B.air || BLOCKS[above].replaceable)) { if (fresh) UI.toast('A door needs two empty blocks, one above the other.'); return; }
-      w.set(tx, ty, B.door); w.set(tx, ty - 1, B.door_top);
-    } else {
-      if (d.solid && this.occupied(tx, ty)) return;
-      w.set(tx, ty, item, 0);
-    }
-    this.sound.play('place', { block: item });
-    p.placeT = 0.15;
-    if (d.plant) this.fx.sparkle(tx, ty + 0.3, 4, '#c8ff9a');
-  },
-
-  fertilize(tx, ty) {
-    const w = this.world, i = w.idx(tx, ty), id = w.get(tx, ty), d = BLOCKS[id];
-    if (d.plant) {
-      if (plantGrows(d, w.getMeta(tx, ty))) {
-        w.advancePlant(i, true);
-        this.fx.sparkle(tx, ty, 16, '#b6ff8a'); this.sound.play('grow');
-      } else UI.toast(`${d.name.replace(' Seeds', '')} is fully grown.`);
-      return;
-    }
-    if (d.soil) {
-      let n = 0;
-      for (let dx = -3; dx <= 3; dx++) {
-        const x = tx + dx;
-        for (let y = ty - 3; y <= ty + 3; y++) {
-          if (BLOCKS[w.get(x, y)].soil && w.get(x, y - 1) === B.air && Math.random() < 0.55) {
-            const pick = [B.rose, B.tulip, B.daisy, B.bluebell, B.tallgrass, B.tallgrass][Math.floor(Math.random() * 6)];
-            w.set(x, y - 1, pick, BLOCKS[pick].plant.stages - 1);
-            this.fx.sparkle(x, y - 1, 3, '#b6ff8a'); n++;
-            break;
-          }
-        }
+    if (d.bucket === 'empty') {
+      const wh = this.raycast(this.reach(), true);
+      if (wh && wh.id === B.water) {
+        w.set(wh.x, wh.y, wh.z, 0, 0, { quiet: true }); this.sound.play('splash');
+        this.consume(1); this.addItem(B.water_bucket, 1); this.swing = 1;
       }
-      if (n) this.sound.play('grow'); else UI.toast('Nothing could sprout here.');
       return;
     }
-    UI.toast('Use Fertilizer on a plant or on grass.');
+    if (s.id === B.fertilizer) {
+      if (!hit) return;
+      const td = BLOCKS[hit.id];
+      if (td.grow && w.grow(hit.x, hit.y, hit.z)) { this.consume(1); this.particles.burst(hit.x + 0.5, hit.y + 0.6, hit.z + 0.5, [0.7, 1, 0.5], 14, 2.5); this.sound.play('grow'); }
+      else if (hit.id === B.grass) {
+        for (let k = 0; k < 10; k++) {
+          const x = hit.x + Math.round((Math.random() - 0.5) * 6), z = hit.z + Math.round((Math.random() - 0.5) * 6);
+          const y = w.topY(x, z);
+          if (w.get(x, y, z) === B.grass && !w.get(x, y + 1, z)) w.set(x, y + 1, z, [B.rose, B.tulip, B.daisy, B.bluebell, B.tallgrass][k % 5], 0, { quiet: true });
+        }
+        this.consume(1); this.sound.play('grow');
+      } else UI.toast('Use Fertilizer on a plant or on grass.');
+      return;
+    }
+    if (!hit) return;
+    if (!isPlaceable(d)) return;
+    let placeId = d.places ? B[d.places] : (d.bucket === 'water' ? B.water : s.id);
+    const pd = BLOCKS[placeId];
+    let px = hit.x + hit.nx, py = hit.y + hit.ny, pz = hit.z + hit.nz;
+    if (BLOCKS[hit.id].replaceable) { px = hit.x; py = hit.y; pz = hit.z; }
+    const cur = w.get(px, py, pz);
+    if (!(cur === 0 || BLOCKS[cur].replaceable || (cur === B.water && placeId !== B.water))) return;
+    if (!w.isLoaded(px, pz) || py < 1 || py >= CH - 1) return;
+    const below = w.get(px, py - 1, pz);
+    let meta = 0;
+    if (pd.shape === 'cross' && pd.plant) {
+      if (!isSoil(below, pd.soil || 'soil')) { UI.toast('Plant it on grass, dirt or farmland.'); return; }
+      if (placeId === B.wheat && below !== B.farmland) w.set(px, py - 1, pz, B.farmland, 0, { quiet: true });
+    }
+    if (pd.torch || placeId === B.lantern || placeId === B.flowerpot) { if (!SOLIDT[below]) { UI.toast('Place it on top of a block.'); return; } }
+    const yaw = this.cam.yaw, fx = -Math.sin(yaw), fz = -Math.cos(yaw);
+    const yawFace = Math.abs(fz) > Math.abs(fx) ? (fz < 0 ? 1 : 0) : (fx < 0 ? 3 : 2);
+    if (placeId === B.ladder) meta = hit.nx === 1 ? 2 : hit.nx === -1 ? 3 : hit.nz === 1 ? 0 : hit.nz === -1 ? 1 : yawFace;
+    if (placeId === B.door) {
+      const up = w.get(px, py + 1, pz);
+      if (!(up === 0 || BLOCKS[up].replaceable)) { UI.toast('A door needs two empty blocks.'); return; }
+      if (this.blocked(px, py, pz) || this.blocked(px, py + 1, pz)) return;
+      w.set(px, py, pz, B.door, yawFace); w.set(px, py + 1, pz, B.door_top, yawFace);
+    } else {
+      if ((pd.solid || placeId === B.door) && this.blocked(px, py, pz)) return;
+      w.set(px, py, pz, placeId, meta);
+      if (placeId === B.water) w.waterQ.add(`${px},${py},${pz}`);
+    }
+    if (this.mode === 'survival') {
+      if (d.bucket === 'water') { this.consume(1); this.addItem(B.bucket, 1); }
+      else this.consume(1);
+    }
+    this.sound.play(placeId === B.water ? 'splash' : 'place', { block: placeId });
+    this.swing = 1;
   },
-
-  useBed(tx, ty) {
-    this.spawnPoint = { x: tx + 0.5, y: ty + 1 };
-    if (!this.isNight()) { UI.toast('Spawn point set. You can sleep once it gets dark.'); this.sound.play('click'); return; }
-    this.sleep();
+  blocked(x, y, z) {
+    const hitB = b => b.x + b.hw > x && b.x - b.hw < x + 1 && b.y + b.h > y && b.y < y + 1 && b.z + b.hw > z && b.z - b.hw < z + 1;
+    if (hitB(this.player)) return true;
+    return this.animals.some(hitB) || this.villagers.some(hitB);
   },
-  sleep() {
-    this.cine.bars(true);
-    this.cine.fade(1, 900);
-    this.sound.play('sleep');
-    Input.blocked = true;
+  occupied(x, y, z) { return this.blocked(x, y, z); },
+  useBed(hit) {
+    this.spawnPoint = { x: hit.x + 0.5, y: hit.y + 1, z: hit.z + 0.5 };
+    if (!this.isNight()) { UI.toast('Spawn point set. You can sleep once it gets dark.'); return; }
+    this.bars(true); this.fade(1, 800); this.sound.play('sleep');
+    this.state = 'sleep';
     setTimeout(() => {
       this.time = 0.02; this.day++;
-      this.weather.rain = 0; this.weather.target = 0;
-      this.cine.title('Good morning!', `Day ${this.day}`, 3000);
-      this.cine.fade(0, 1200);
-      Input.blocked = false;
-      setTimeout(() => this.cine.bars(false), 2400);
-    }, 1500);
+      this.cineTitle('Good morning!', `Day ${this.day}`, '', 2800);
+      this.fade(0, 1000); this.state = 'play';
+      setTimeout(() => this.bars(false), 2000);
+    }, 1400);
   },
 
-  pickBlock() {
-    const t = this.target;
-    if (!t) return;
-    let id = this.world.get(t.x, t.y);
-    if (id === B.air) id = this.world.getBg(t.x, t.y);
-    if (id === B.door_top) id = B.door;
-    if (!id || BLOCKS[id].cat === 'hidden') return;
-    const at = this.hotbar.indexOf(id);
-    if (at >= 0) this.selectSlot(at); else this.setHotbarItem(this.sel, id);
+  // --- inventory -------------------------------------------------------------------------
+  slot(i) { return this.inv[i]; },
+  selectSlot(i) {
+    this.sel = i;
+    UI.refreshHotbar();
+    const s = this.slot(i);
+    UI.showItemLabel(s ? BLOCKS[s.id].name : 'Empty hand');
+    this.sound.play('click');
   },
-
-  occupied(tx, ty) {
-    const hit = e => e.x - e.w / 2 < tx + 1 && e.x + e.w / 2 > tx && e.y - e.h < ty + 1 && e.y > ty;
-    if (hit(this.player)) return true;
-    for (const e of this.entities) if ((e instanceof NPC || e instanceof Animal) && hit(e)) return true;
-    return false;
+  setHotbarItem(i, id) { this.inv[i] = { id, n: 1 }; this.selectSlot(i); },
+  canPickup(id) { return this.mode === 'survival' && this.inv.some(s => !s || (s.id === id && s.n < BLOCKS[id].stack)); },
+  addToRange(id, n, a, b) {
+    const max = BLOCKS[id].stack;
+    for (let i = a; i < b && n > 0; i++) { const s = this.inv[i]; if (s && s.id === id && s.n < max) { const k = Math.min(n, max - s.n); s.n += k; n -= k; } }
+    for (let i = a; i < b && n > 0; i++) { if (!this.inv[i]) { const k = Math.min(n, max); this.inv[i] = { id, n: k }; n -= k; } }
+    return n;
   },
+  addItem(id, n) {
+    const left = this.addToRange(id, n, 0, 36);
+    if (left > 0) { const p = this.player; this.drops.push(new ItemDrop(p.x, p.y + 1, p.z, id, left)); }
+    this.inventoryChanged();
+  },
+  giveBack(stack) { this.addItem(stack.id, stack.n); },
+  pickup(drop) {
+    this.addItem(drop.id, drop.n);
+    this.sound.play('pop');
+    UI.showItemLabel(`+${drop.n} ${BLOCKS[drop.id].name}`);
+  },
+  consume(n) {
+    const s = this.inv[this.sel];
+    if (!s || this.mode !== 'survival') return;
+    s.n -= n;
+    if (s.n <= 0) this.inv[this.sel] = null;
+    this.inventoryChanged();
+  },
+  countItems(ids) { let n = 0; for (const s of this.inv) if (s && ids.includes(s.id)) n += s.n; return n; },
+  canMake(r) { return r.ins.every(i => this.countItems(i.ids) >= i.n); },
+  make(r, times = 1) {
+    let made = 0;
+    for (let t = 0; t < times && this.canMake(r); t++) {
+      for (const ing of r.ins) {
+        let need = ing.n;
+        for (let i = 35; i >= 0 && need > 0; i--) {
+          const s = this.inv[i];
+          if (!s || !ing.ids.includes(s.id)) continue;
+          const k = Math.min(need, s.n); s.n -= k; need -= k;
+          if (!s.n) this.inv[i] = null;
+        }
+      }
+      this.addToRange(r.outId, r.outN, 0, 36) && this.drops.push(new ItemDrop(this.player.x, this.player.y + 1, this.player.z, r.outId, 1));
+      made++;
+    }
+    if (made) { this.sound.play('craft'); UI.toast(`Made ${BLOCKS[r.outId].name}${made > 1 ? ' × ' + made : ''}`); }
+    this.inventoryChanged();
+  },
+  inventoryChanged() { UI.refreshHotbar(); },
 
-  // --- world events, doors, ambience ---------------------------------------------------
+  // --- life: animals and villagers -------------------------------------------------------------
+  spawnLife() {
+    const w = this.world, p = this.player;
+    this.animals = this.animals.filter(a => Math.hypot(a.x - p.x, a.z - p.z) < 90);
+    if (this.animals.length < 10 && !this.isNight()) {
+      const a = Math.random() * TAU, d = 20 + Math.random() * 20;
+      const x = Math.floor(p.x + Math.cos(a) * d), z = Math.floor(p.z + Math.sin(a) * d);
+      if (w.isLoaded(x, z)) {
+        const y = w.topY(x, z);
+        if (w.get(x, y, z) === B.grass) {
+          const kind = ['sheep', 'pig', 'chicken'][Math.floor(Math.random() * 3)];
+          for (let k = 0; k < 2; k++) this.animals.push(new Animal(kind, x + 0.5 + k, y + 1, z + 0.5));
+        }
+      }
+    }
+    // villagers for nearby villages and cities
+    const T = w.gen;
+    for (let rx = Math.floor(p.x / REGION) - 1; rx <= Math.floor(p.x / REGION) + 1; rx++) for (let rz = Math.floor(p.z / REGION) - 1; rz <= Math.floor(p.z / REGION) + 1; rz++) {
+      const r = T.regionInfo(rx, rz);
+      const key = rx + ',' + rz;
+      if (!r.type || this.spawnedRegions.has(key) || Math.hypot(r.cx - p.x, r.cz - p.z) > 110) continue;
+      T.stamp(r);
+      this.spawnedRegions.add(key);
+      const rng = new RNG(hashString(key + w.seedStr));
+      for (const n of (r.npcs || []).slice(0, 12)) {
+        const v = new Body(n.x, n.y, n.z, 0.32, 1.45);
+        v.look = beanLook(rng); v.home = [n.x, n.z]; v.timer = 0; v.dir = 0; v.moving = false; v.talkCd = rng.range(0, 6);
+        v.name = rng.pick(BOT_NAMES);
+        this.villagers.push(v);
+      }
+      if (Math.hypot(r.cx - p.x, r.cz - p.z) < 110) this.cineTitle(r.name, r.type === 'city' ? 'City' : 'Village', '', 3200);
+    }
+  },
+  updateVillager(v, dt) {
+    const w = this.world, p = this.player;
+    if (!w.isLoaded(Math.floor(v.x), Math.floor(v.z)) || Math.hypot(v.x - p.x, v.z - p.z) > 100) return;
+    v.timer -= dt; v.talkCd -= dt;
+    if (v.timer <= 0) {
+      v.moving = !v.moving && Math.random() < 0.6; v.timer = 1.5 + Math.random() * 3;
+      v.dir = Math.random() * TAU;
+      if (Math.hypot(v.x - v.home[0], v.z - v.home[1]) > 9) v.dir = Math.atan2(-(v.home[0] - v.x), -(v.home[1] - v.z));
+    }
+    const dist = Math.hypot(p.x - v.x, p.z - v.z);
+    if (dist < 3 && v.talkCd <= 0 && this.state === 'play') {
+      v.talkCd = 25; v.moving = false; v.timer = 3;
+      UI.toast(`${v.name}: ${VILLAGER_LINES[Math.floor(Math.random() * VILLAGER_LINES.length)]}`);
+      this.sound.play('talk');
+    }
+    const ctl = { mx: v.moving ? -Math.sin(v.dir) : 0, mz: v.moving ? -Math.cos(v.dir) : 0 };
+    v.prevY = v.y;
+    controlBody(v, ctl, { speed: 1.6, sprint: 1.6, jump: 8.6, accel: 10, air: 2 }, w, dt, {});
+    if (v.hitWall && v.onGround) v.vy = 8.6;
+    v.yawVis = dist < 3 ? Math.atan2(-(p.x - v.x), -(p.z - v.z)) : (v.yawTarget || 0);
+  },
+  near(b, d) { const e = this.cam.eye; return Math.hypot(b.x - e[0], b.z - e[2]) < d; },
+
+  // --- world events ---------------------------------------------------------------------------------
   worldEvents() {
-    const w = this.world, cx = this.cam.x, cy = this.cam.y;
+    const w = this.world;
     for (const ev of w.events) {
-      const near = Math.abs(ev.x - cx) < 45 && Math.abs(ev.y - cy) < 30;
+      const near = this.near(ev, 40);
       switch (ev.type) {
-        case 'break': if (near) this.fx.debris(ev.x, ev.y, ev.id, 6); break;
-        case 'fall': this.entities.push(new FallingBlock(ev.x, ev.y, ev.id)); break;
-        case 'grow': if (near) { this.fx.sparkle(ev.x, ev.y, 5, '#c8ff9a'); this.sound.play('grow'); } break;
-        case 'growBig':
-          if (near) {
-            this.fx.sparkle(ev.x - 1, ev.y - 2, 30); this.sound.play('growBig');
-            if (ev.label) this.fx.text(ev.x + 0.5, ev.y - 2, ev.label, '#fff6a0');
-          }
+        case 'pop':
+          if (near) this.particles.blockBreak(ev.x, ev.y, ev.z, ev.id);
+          if (this.mode === 'survival') for (const [id, n] of this.dropsFor(ev.id, 0)) this.drops.push(new ItemDrop(ev.x + 0.5, ev.y + 0.3, ev.z + 0.5, id, n));
           break;
-        case 'place':
-          if (near && !ev.quiet) this.sound.play('place', { block: ev.id });
-          if (near && BLOCKS[ev.id].leaves && Math.random() < 0.25) this.fx.leaf(ev.x + 0.5, ev.y + 0.5, ev.id === B.leaves_cherry ? '#f5b5cc' : '#5fb83a');
-          break;
-        case 'crumble': if (near) { this.fx.debris(ev.x, ev.y, B.crumble, 6); this.sound.play('break', { block: B.sand }); } break;
+        case 'grow': if (near) { this.particles.burst(ev.x + 0.5, ev.y + 0.5, ev.z + 0.5, [0.7, 1, 0.5], 6, 1.5); this.sound.play('grow'); } break;
+        case 'growBig': if (near) { this.sound.play('growBig'); this.particles.burst(ev.x + 0.5, ev.y + 1, ev.z + 0.5, [1, 0.95, 0.5], 30, 4); if (ev.label) UI.toast(`It grew into a ${ev.label}!`); } break;
+        case 'build': if (near && Math.random() < 0.3) this.sound.play('place', { block: ev.id }); break;
+        case 'crumble': if (near) { this.particles.blockBreak(ev.x, ev.y, ev.z, B.crumble); this.sound.play('break', { block: B.sand }); } break;
         case 'fuse': if (near) this.sound.play('fuse'); break;
         case 'explode': {
-          const pl = this.player;
-          const dd = Math.hypot(pl.x - ev.x, pl.y - 1 - ev.y);
-          this.fx.explosion(ev.x + 0.5, ev.y + 0.5, ev.r);
-          if (dd < 60) { this.sound.play('explode'); this.shake(clamp(1.2 - dd / 30, 0.2, 1)); }
-          if (dd < ev.r + 2) { pl.vx += Math.sign(pl.x - ev.x || 1) * 12; pl.vy = -12; }
+          const p = this.player, d = Math.hypot(p.x - ev.x, p.y - ev.y, p.z - ev.z);
+          this.particles.burst(ev.x + 0.5, ev.y + 0.5, ev.z + 0.5, [1, 0.7, 0.3], 40, 9, 0.18, 6, 0.8);
+          this.particles.burst(ev.x + 0.5, ev.y + 0.5, ev.z + 0.5, [0.4, 0.4, 0.42], 30, 5, 0.3, 2, 1.5);
+          if (d < 50) { this.sound.play('explode'); this.shake = clamp(1.2 - d / 25, 0.15, 1); }
+          if (d < ev.r + 2.5) { p.vy = 9; p.vx += Math.sign(p.x - ev.x) * 8; p.vz += Math.sign(p.z - ev.z) * 8; this.hurt(Math.ceil(8 - d * 1.5), 'A Boom Block went off.'); }
           break;
         }
-        case 'debris': if (near) this.fx.debris(ev.x, ev.y, ev.id, 3); break;
+        case 'debris': if (near) this.particles.blockBreak(ev.x, ev.y, ev.z, ev.id); break;
         default: break;
       }
     }
     w.events.length = 0;
   },
 
-  updateDoors() {
-    const w = this.world, set = this.doorsOpen;
-    const before = new Set(set);
-    set.clear();
-    const check = e => {
-      const fx = Math.floor(e.x), fy = Math.floor(e.y - 0.5);
-      for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 0; dy++) {
-        const x = fx + dx, y = fy + dy;
-        if (w.get(x, y) === B.door && Math.abs(x + 0.5 - e.x) < 1.3) set.add(w.idx(x, y));
-      }
-    };
-    if (!this.hidePlayer) check(this.player);
-    for (const e of this.entities) if (e instanceof NPC && Math.abs(e.x - this.cam.x) < 60) check(e);
-    if (this.state !== 'play') return;
-    const p = this.player;
-    for (const k of set) if (!before.has(k) && Math.abs((k % w.W) - p.x) < 3) { this.sound.play('open'); break; }
-    for (const k of before) if (!set.has(k) && Math.abs((k % w.W) - p.x) < 3) { this.sound.play('close'); break; }
+  // --- parkour ------------------------------------------------------------------------------------
+  makeEntrants(n) {
+    const rng = new RNG(Math.floor(Math.random() * 1e9));
+    const names = rng.shuffle(BOT_NAMES.slice());
+    const list = [{ name: 'You', look: Object.assign(beanLook(rng, '#2fb4a4'), { hat: 'cap', hatColor: [1, 0.8, 0.25] }), skill: 1, isPlayer: true }];
+    for (let i = 0; i < n - 1; i++) list.push({ name: names[i], look: beanLook(rng), skill: rng.range(0.45, 0.98), isPlayer: false });
+    return list;
   },
-
-  ambient() {
-    const w = this.world, r = this.renderer, cam = this.cam;
-    const halfW = r.W / cam.bs / 2, halfH = r.H / cam.bs / 2;
-    const night = this.isNight();
-    this.entities = this.entities.filter(e => !e.dead);
-    const count = cls => { let n = 0; for (const e of this.entities) if (e instanceof cls) n++; return n; };
-    const rnd = (a, b) => a + Math.random() * (b - a);
-    const surfaceHere = this.groundAt(cam.x);
-    if (!night && this.weather.rain < 0.5 && cam.y < surfaceHere + 4 && count(Bird) < 5 && Math.random() < 0.3) {
-      const side = Math.random() < 0.5 ? -1 : 1;
-      const bx = cam.x + side * (halfW + 3), by = cam.y - halfH * rnd(0.3, 0.8);
-      if (w.get(Math.floor(bx), Math.floor(by)) === B.air) { const b = new Bird(bx, by); b.vx = -side * Math.abs(b.vx); this.entities.push(b); }
-    }
-    if (count(Fish) < 8) {
-      for (let k = 0; k < 8; k++) {
-        const x = Math.floor(cam.x + rnd(-halfW, halfW)), y = Math.floor(cam.y + rnd(-halfH, halfH));
-        if (w.get(x, y) === B.water && w.get(x, y - 1) === B.water && w.get(x, y + 1) === B.water) { this.entities.push(new Fish(x + 0.5, y + 0.5)); break; }
-      }
-    }
-    if (!night && count(Butterfly) < 4 && Math.random() < 0.4) {
-      const x = Math.floor(cam.x + rnd(-halfW, halfW));
-      const y = this.groundAt(x) - 1;
-      if (BLOCKS[w.get(x, y)].flower) this.entities.push(new Butterfly(x + 0.5, y - 1));
-    }
-    if (night) {
-      for (let k = 0; k < 3; k++) {
-        const x = Math.floor(cam.x + rnd(-halfW, halfW));
-        const y = w.surfaceY(x);
-        const top = w.get(x, y);
-        if ((top === B.grass || top === B.tallgrass || BLOCKS[top].flower) && Math.abs(y - cam.y) < halfH) this.fx.firefly(x + Math.random(), y - 0.5 - Math.random() * 2.5);
-      }
-    }
-    for (const em of w.emitters) {
-      if (Math.abs(em.x - cam.x) < halfW + 4 && Math.abs(em.y - cam.y) < halfH + 6 && Math.random() < 0.7) this.fx.smoke(em.x, em.y);
-    }
-    for (const [kind, x, y] of r.visibleEmitters) {
-      if (kind === 'ember') this.fx.add({ type: 'spark', x, y, vx: (Math.random() - 0.5) * 0.4, vy: -0.8 - Math.random(), life: 0.8, size: 0.07, color: '#ffb347', glow: true, fade: true });
-      else if (kind === 'petal') this.fx.leaf(x, y, '#f5b5cc');
-    }
-    r.visibleEmitters.length = 0;
-    if (this.weather.rain > 0.4) {
-      for (let k = 0; k < 6; k++) {
-        const x = Math.floor(cam.x + rnd(-halfW, halfW));
-        const y = w.surfaceY(x);
-        if (Math.abs(y - cam.y) < halfH) this.fx.add({ type: 'sq', x: x + Math.random(), y, vx: (Math.random() - 0.5) * 2, vy: -2, life: 0.25, size: 0.08, color: 'rgba(190,215,255,0.8)', g: 18, fade: true });
-      }
-    }
+  startPractice(def) {
+    this.cup = null;
+    this.startRace(def, { qualify: 0, entrants: this.makeEntrants(12), round: 0, roundName: 'Practice' });
   },
-
-  updateWeather(dt) {
-    const wt = this.weather;
-    wt.timer -= dt;
-    if (wt.timer <= 0) {
-      wt.target = wt.target > 0 ? 0 : (Math.random() < 0.55 ? 1 : 0);
-      wt.timer = wt.target ? 70 + Math.random() * 70 : 200 + Math.random() * 200;
-    }
-    wt.rain += (wt.target - wt.rain) * Math.min(1, dt * 0.25);
+  startCup() {
+    const defs = new RNG(Date.now() >>> 0).shuffle(COURSES.slice()).slice(0, 3);
+    this.cup = { round: 0, defs, rounds: [{ name: 'Round 1', qualify: 8 }, { name: 'Round 2', qualify: 4 }, { name: 'Final', qualify: 1 }], entrants: this.makeEntrants(12) };
+    this.startCupRound();
   },
-
-  // --- zones & places -------------------------------------------------------------------
-  zoneAt(x) {
-    let best = null;
-    for (const z of this.world.zones) {
-      if (z.quiet || x < z.x0 - 4 || x > z.x1 + 4) continue;
-      if (!best || (z.x1 - z.x0) < (best.x1 - best.x0)) best = z;
-    }
-    return best;
+  startCupRound() {
+    const c = this.cup, R = c.rounds[c.round];
+    this.startRace(c.defs[c.round], { qualify: R.qualify, entrants: c.entrants, round: c.round, roundName: R.name });
   },
-  checkZone() {
-    const p = this.player, z = this.zoneAt(p.x);
-    if (!z || this.discovered.has(z.name)) return;
-    if (z.type === 'course' && z.course.type === 'rooftop' && p.y > z.course.fallY - 2) return;
-    this.discovered.add(z.name);
-    const sub = z.type === 'village' ? 'Village' : z.type === 'city' ? 'City' : 'Parkour · ' + (z.desc || '');
-    this.cine.zoneTitle(z.name, sub);
+  startRace(def, opts) {
+    this.sound.init();
+    UI.closeResults();
+    UI.showLoading(true, 'Building the course…');
+    this.state = 'loading';
+    setTimeout(() => {
+      if (this.world) for (const c of this.world.chunks.values()) this.r.freeChunk(c);
+      this.mode = 'parkour';
+      opts.seed = def.random ? Math.floor(Math.random() * 1e9) : 1;
+      const race = new Race(this, def, opts);
+      this.race = race;
+      this.world = race.world;
+      this.player = race.player;
+      this.drops = []; this.animals = []; this.villagers = []; this.particles.list.length = 0;
+      for (const c of this.world.chunks.values()) { this.world.dirty.delete(CK(c.cx, c.cz)); this.r.uploadChunk(c, buildChunkMesh(this.world, c)); }
+      this.world.urgent.clear();
+      this.time = def.id === 'tower' ? 0.42 : def.id === 'belts' ? 0.05 : 0.2;
+      this.cam.yaw = Math.PI; this.cam.pitch = -0.32;
+      UI.setMode('parkour');
+      document.body.classList.add('playing');
+      UI.showLoading(false); UI.hideTitle();
+      UI.showHUD(false);
+      this.state = 'race';
+      Input.enabled = true;
+      this.raceIntro();
+    }, 40);
+  },
+  raceIntro() {
+    const race = this.race, wps = race.course.wps;
+    race.camOverride = true;
+    this.bars(true);
+    const sub = race.qualify ? `${race.opts.roundName} · top ${race.qualify} go through` : race.def.desc;
+    this.cineTitle(race.def.name, sub, '', 4200);
     this.sound.play('discover');
+    race.intro = { t: 0, dur: 5.2 };
   },
-  locationInfo() {
-    const p = this.player, w = this.world;
-    if (!p || !w) return { name: '', icon: 'ui_pin' };
-    if (p.y > w.terrainY[clamp(Math.floor(p.x), 0, w.W - 1)] + 6 && !p.fly) return { name: 'Underground', icon: 'ui_pick' };
-    const z = this.zoneAt(p.x);
-    if (z) return { name: z.name, icon: z.type === 'village' ? 'ui_house' : z.type === 'city' ? 'ui_city' : z.type === 'lake' ? 'ui_lake' : 'flag_start' };
-    return { name: biomeAt(w, p.x).name, icon: 'ui_pin' };
-  },
-  places() {
-    const w = this.world, list = [];
-    list.push({ name: 'World spawn', short: 'Spawn', kind: 'Where you started', icon: 'ui_pin', x: w.spawn.x, y: w.spawn.y, feet: w.spawn.y });
-    if (this.spawnPoint) list.push({ name: 'Your bed', short: 'Bed', kind: 'Your spawn point', icon: 'bed', x: this.spawnPoint.x, y: this.spawnPoint.y, feet: this.spawnPoint.y });
-    for (const z of w.zones) {
-      if (z.type === 'village') list.push({ name: z.name, short: z.name, kind: 'Village', icon: 'ui_house', x: (z.x0 + z.x1) / 2, y: z.gy, feet: z.gy });
-      else if (z.type === 'city') list.push({ name: z.name, short: z.name, kind: 'City', icon: 'ui_city', x: z.x0 + 4, y: z.gy, feet: z.gy });
-      else if (z.type === 'course') {
-        const c = z.course;
-        let x = c.x0 - 3;
-        if (c.type === 'rooftop') x = c.start.x - 7;
-        if (c.type === 'lava') x = c.start.x - 2;
-        list.push({ name: c.name, short: c.name, kind: 'Parkour · ' + c.desc, icon: 'flag_start', x, y: c.topY, best: this.parkour.bestFor(c) });
-      } else if (z.type === 'lake') list.push({ name: z.name, short: z.name, kind: 'Lake', icon: 'ui_lake', x: (z.x0 + z.x1) / 2, y: w.surfaceY((z.x0 + z.x1) / 2) });
+  updateRace(dt) {
+    const race = this.race;
+    if (!race) return;
+    const cam = this.cam;
+    if (race.intro) {
+      // fly from the finish back to the start
+      const I = race.intro; I.t += dt;
+      const u = easeInOut(clamp(I.t / I.dur, 0, 1));
+      const z = lerp(race.course.finishZ + 6, 4, u);
+      const wp = race.course.wps.reduce((a, w) => (Math.abs(w.z - z) < Math.abs(a.z - z) ? w : a), race.course.wps[0]);
+      cam.eye = [10 - u * 8, wp.y + 9 - u * 3, z - 12 + u * 2];
+      const look = [0.5, wp.y, z + 4];
+      cam.yawI = Math.atan2(-(look[0] - cam.eye[0]), -(look[2] - cam.eye[2]));
+      cam.pitchI = Math.atan2(look[1] - cam.eye[1], Math.hypot(look[0] - cam.eye[0], look[2] - cam.eye[2]));
+      if (Input.was('Escape', 'Space', 'Enter') || Input.mouse.leftPress || Input.tapPlace) I.t = I.dur;
+      if (I.t >= I.dur) { race.intro = null; race.camOverride = false; this.bars(false); this.beginCountdown(); }
     }
-    return list.sort((a, b) => a.x - b.x);
+    if (this.state === 'race' && !UI.open) {
+      if (Input.was('Escape')) UI.openPanel('pause');
+      if (Input.was('KeyR') && race.state === 'run') race.respawn(race.player);
+      if (Input.was('KeyH')) UI.openPanel('help');
+    }
+    const inp = Input.state();
+    const v = this.wish(inp);
+    race.update(dt, { mx: v.mx, mz: v.mz, jump: inp.jump, jumpHeld: inp.jumpHeld });
+    if (race.orbit) {
+      race.orbit.t += dt;
+      const p = race.player, a = race.orbit.t * 0.5 + race.orbit.a0;
+      cam.eye = [p.x + Math.sin(a) * 6, p.y + 2.6, p.z + Math.cos(a) * 6];
+      cam.yawI = Math.atan2(-(p.x - cam.eye[0]), -(p.z - cam.eye[2]));
+      cam.pitchI = -0.25;
+    }
+    this.particles.update(dt, this.world);
+    this.world.timerStep(dt, (x, y, z) => race.racers.some(r => r.x + r.hw > x && r.x - r.hw < x + 1 && r.y < y + 1.01 && r.y + r.h > y && r.z + r.hw > z && r.z - r.hw < z + 1));
+    this.worldEvents();
   },
-  travelTo(place) {
-    UI.closePanels();
-    if (this.parkour.active) this.parkour.cancel('Course cancelled.');
-    const x = clamp(place.x, 4, this.world.W - 5);
-    const w = this.world, fx = Math.floor(x);
-    const clear = f => !BLOCKS[w.get(fx, f - 1)].solid && !BLOCKS[w.get(fx, f - 2)].solid;
-    const y = place.feet !== undefined && clear(place.feet) ? place.feet : this.groundAt(x);
-    this.teleport(x, y, {});
-    if (place.name) setTimeout(() => this.cine.zoneTitle(place.name, place.kind || ''), 500);
+  beginCountdown() {
+    const race = this.race;
+    race.state = 'countdown';
+    UI.showHUD(true);
+    const steps = ['3', '2', '1'];
+    steps.forEach((s, i) => setTimeout(() => { if (this.race === race) { UI.countdown(s); this.sound.play('countdown'); } }, i * 850));
+    setTimeout(() => {
+      if (this.race !== race) return;
+      UI.countdown('GO!', true); this.sound.play('go');
+      race.openGate(); race.state = 'run';
+      UI.toast(Input.isTouch ? 'Drag left to run, tap ▲ to jump.' : 'WASD to run, Space to jump, mouse to look.');
+    }, steps.length * 850);
   },
-  teleport(x, y, opts = {}) {
-    if (this.teleporting) return;
-    this.teleporting = true;
-    const p = this.player;
-    this.cine.flash(() => {
-      p.x = x; p.y = y; p.vx = 0; p.vy = 0; p.boostT = 0; p.climbing = false;
-      p.scarf.forEach(s => { s.x = x; s.y = y - 1.4; });
-      this.cam.x = x; this.cam.y = y - 1.4;
-      this.teleporting = false;
-      this.sound.play('respawn');
-    }, opts.quick ? 160 : 380);
+  onPlayerFinished(race, r) {
+    this.slowMo = 0.9;
+    this.bars(true);
+    const q = race.qualify;
+    let main, cls = 'win';
+    if (q) main = r.place <= q ? (q === 1 ? 'CHAMPION!' : 'QUALIFIED!') : 'Too slow!';
+    else main = `${ordinal(r.place)} place!`;
+    if (q && r.place > q) cls = 'lose';
+    this.cineTitle(main, `Time ${formatTime(r.time)}`, cls, 3600);
+    race.orbit = { t: 0, a0: Math.random() * TAU };
+    race.camOverride = true;
+    if (!q) {
+      const best = Store.get('pr3d.parkour', {}), prev = best[race.def.id];
+      if (!prev || r.place < prev.place || (r.place === prev.place && r.time < prev.time)) { best[race.def.id] = { place: r.place, time: r.time }; Store.set('pr3d.parkour', best); }
+    }
   },
-  respawnPlayer(reason) {
-    if (this.teleporting) return;
-    if (this.parkour.active) { this.parkour.fail(); if (reason === 'lava') UI.toast('Ouch! Back to the checkpoint.'); return; }
-    const sp = this.spawnPoint || this.world.spawn;
-    if (reason === 'lava') UI.toast('Ouch! Lava is hot. Back to your spawn point.');
-    this.sound.play('hurt');
-    this.teleport(sp.x, sp.y, {});
+  onRaceOver(race) {
+    setTimeout(() => {
+      if (this.race !== race) return;
+      this.bars(false);
+      Input.releaseLock();
+      const p = race.player, place = race.placeOf(p);
+      if (!this.cup) {
+        UI.showResults(race, { title: p.finished ? `${ordinal(p.place)} place!` : 'Race over', sub: `${race.def.name}${p.finished ? ' · ' + formatTime(p.time) : ''}`, next: false });
+        return;
+      }
+      const c = this.cup, R = c.rounds[c.round];
+      const qualified = p.finished && p.place <= R.qualify;
+      c.entrants = race.racers.filter(x => x.finished && x.place <= R.qualify).map(x => ({ name: x.name, look: x.look, skill: x.skill, isPlayer: x.isPlayer }));
+      if (qualified && c.round === c.rounds.length - 1) {
+        Store.set('pr3d.cups', Store.get('pr3d.cups', 0) + 1);
+        UI.showResults(race, { title: 'You won the Knockout Cup!', sub: 'The crown is yours.', next: false, againLabel: 'Play another cup' });
+        this.sound.play('qualify');
+      } else if (qualified) {
+        UI.showResults(race, { title: 'Qualified!', sub: `${R.name} done. ${R.qualify} racers go through.`, next: true, nextLabel: `Go to ${c.rounds[c.round + 1].name}` });
+      } else {
+        UI.showResults(race, { title: 'Eliminated', sub: `You placed ${ordinal(place)}. Only the top ${R.qualify} went through.`, next: false, againLabel: 'Try another cup' });
+        this.sound.play('eliminated');
+      }
+    }, race.player.finished ? 2200 : 600);
   },
-  retry() {
-    if (this.parkour.active) this.parkour.fail();
-    else UI.toast('Touch a green Start flag to begin a parkour course.');
+  resultsAction(a) {
+    UI.closeResults();
+    if (a === 'menu') { this.quitToTitle(); return; }
+    if (a === 'next' && this.cup) { this.cup.round++; this.startCupRound(); return; }
+    if (this.cup) this.startCup(); else this.startPractice(this.race.def);
   },
-  onFlag(type, x, y) { this.parkour.touch(type, x, y); },
 
-  celebrate(x, y, main, sub) {
-    this.sound.play('finish');
-    this.cine.bars(true);
-    this.cine.title(main, sub, 4300, 'win');
-    this.slowMo = 1.1;
-    this.cam.targetZoomMul = 1.25;
-    for (let k = 0; k < 8; k++) setTimeout(() => this.fx.firework(x, y - 1), 150 + k * 260);
-    this.fx.sparkle(x - 1, y - 1, 30);
-    setTimeout(() => { if (!this.cinemaMode) this.cine.bars(false); this.cam.targetZoomMul = 1; }, 4000);
-  },
-
-  // --- toggles & hotbar ------------------------------------------------------------------
-  selectSlot(i) {
-    this.sel = i;
-    this.player.heldTi = BLOCKS[this.hotbar[i]].iconTi;
-    UI.refreshHotbar();
-    UI.showItemLabel(BLOCKS[this.hotbar[i]].name);
-    this.sound.play('click');
-  },
-  setHotbarItem(i, id) {
-    this.hotbar[i] = id;
-    this.selectSlot(i);
-  },
-  toggleFly() {
-    const p = this.player;
-    p.fly = !p.fly;
-    if (p.fly && this.parkour.active) this.parkour.cancel('Flying cancels the course.');
-    UI.updateToggles();
-    UI.toast(p.fly ? 'Flying: hold Space or W to rise, S to sink.' : 'Flying off.');
-    this.sound.play(p.fly ? 'boost' : 'click');
-  },
-  toggleWall() {
-    this.wallMode = !this.wallMode;
-    UI.updateToggles();
-    UI.toast(this.wallMode ? 'Back wall mode: build and break the walls behind you.' : 'Back wall mode off.');
-  },
-  toggleTouchMode() {
-    this.touchMode = this.touchMode === 'mine' ? 'build' : 'mine';
-    UI.updateToggles();
-    UI.toast(this.touchMode === 'build' ? 'Build mode: tap the world to place your selected block.' : 'Dig mode: tap or hold to dig.');
-    this.sound.play('click');
-  },
-  setCinema(on) {
-    this.cinemaMode = on;
-    this.cine.bars(on);
-    UI.showHUD(!on);
-    this.hideCursor = on;
-    if (on) UI.toast('Cinematic camera. Press C or Esc to exit.');
-  },
-  zoom(f) {
-    this.userZoom = clamp(this.userZoom * f, 0.6, 1.8);
-    this.saveSettings();
-  },
-  shake(a) { if (!REDUCED_MOTION) this.shakeAmt = Math.max(this.shakeAmt, a); },
+  // --- saving & misc ------------------------------------------------------------------------------
   saveNow(silent) {
-    if (!this.world || this.state === 'title' || this.state === 'intro') return;
+    if (!this.world || this.mode === 'parkour' || this.mode === 'title' || !['play', 'menu', 'dead'].includes(this.state)) return;
     const ok = Save.write(this);
     if (!silent) UI.toast(ok ? 'World saved.' : 'Couldn’t save: your browser’s storage is full or turned off.');
   },
+  isNight() { return Math.sin(this.time * TAU) < -0.08; },
+  locationName() {
+    const p = this.player, w = this.world;
+    if (!w.gen) return '';
+    const r = w.gen.regionAt(p.x, p.z);
+    if (r.type && Math.hypot(p.x - r.cx, p.z - r.cz) < r.r * 1.2) return r.name;
+    if (p.y < w.gen.height(Math.floor(p.x), Math.floor(p.z)) - 6) return 'Underground';
+    return BIOMES[w.gen.biome(Math.floor(p.x), Math.floor(p.z))];
+  },
 
-  // --- helpers ------------------------------------------------------------------------
-  isNight() { return Math.sin(this.time * TAU) < -0.06; },
-  groundAt(x) {
-    const w = this.world;
-    x = clamp(Math.floor(x), 0, w.W - 1);
-    for (let y = 0; y < w.H; y++) {
-      const d = BLOCKS[w.fg[y * w.W + x]];
-      if ((d.solid && !d.leaves) || d.liquid) return y;
+  // --- rendering ------------------------------------------------------------------------------------
+  sky() {
+    const a = this.time * TAU, sy = Math.sin(a);
+    const day = smoothstep(-0.12, 0.22, sy), tw = smoothstep(0.38, 0, Math.abs(sy));
+    const mix = (c1, c2, t) => c1.map((v, i) => v + (c2[i] - v) * t);
+    let top = mix([0.02, 0.03, 0.08], [0.32, 0.56, 0.94], day);
+    top = mix(top, [0.3, 0.3, 0.6], tw * 0.5);
+    let hor = mix([0.05, 0.07, 0.15], [0.7, 0.85, 1.0], day);
+    hor = mix(hor, [1.0, 0.6, 0.38], tw * 0.7);
+    const sun = [Math.cos(a), sy, 0.3]; const l = Math.hypot(...sun);
+    return { top, hor, sun: sun.map(v => v / l), sunCol: mix([1, 0.55, 0.3], [1, 0.96, 0.82], clamp(sy * 3, 0, 1)), day: 0.13 + 0.87 * day, night: 1 - day };
+  },
+  render() {
+    const r = this.r, w = this.world, cam = this.cam, p = this.player;
+    const s = this.sky();
+    const third = this.mode === 'parkour' || cam.view === 'third' || this.cinemaMode || this.state === 'title' || this.state === 'intro';
+    const headWater = w.get(Math.floor(cam.eye[0]), Math.floor(cam.eye[1]), Math.floor(cam.eye[2])) === B.water;
+    const far = this.mode === 'parkour' ? 170 : (this.state === 'title' ? 70 : this.viewRadius() * CS);
+    const F = {
+      eye: cam.eye, yaw: cam.yawI !== undefined ? cam.yawI : cam.yaw, pitch: cam.pitchI !== undefined ? cam.pitchI : cam.pitch,
+      fov: 1.22, far: headWater ? 22 : far, fog: headWater ? [0.1, 0.25, 0.5] : s.hor, skyTop: s.top, sun: s.sun, sunCol: s.sunCol,
+      night: s.night, day: s.day, time: w.clock,
+    };
+    r.begin(F);
+    r.drawWorld(w);
+    r.beginBoxes();
+    const L = b => {
+      if (this.mode === 'parkour') return s.day;
+      const top = w.topY(Math.floor(b.x), Math.floor(b.z));
+      return b.y + 1 >= top ? s.day : 0.25 * s.day + 0.15;
+    };
+    if (this.mode === 'parkour' && this.race) {
+      r.boxAt(cam.eye[0], 16, cam.eye[2] + 40, 1600, 0.2, 1600, [0.3, 0.62, 0.95], s.day);
+      for (const o of this.race.obstacles) o.draw(r, s.day);
+      for (const rc of this.race.racers) if (!rc.out) drawBean(r, rc, rc.look, s.day);
+    } else {
+      for (const a of this.animals) if (this.near(a, far)) a.draw(r, L(a));
+      for (const v of this.villagers) if (this.near(v, far)) drawBean(r, v, v.look, L(v));
+      if (third && this.state !== 'title' && this.state !== 'intro') { const s0 = this.slot(this.sel); drawBean(r, p, p.look, L(p), { held: s0 ? s0.id : undefined }); }
     }
-    return w.H - 2;
+    r.beginBoxes();
+    this.particles.draw(r, s.day);
+    for (const d of this.drops) d.draw(r, L(d), 0);
+    if (this.target && this.state === 'play' && !this.cinemaMode) {
+      const t = this.target;
+      r.outline(t.x, t.y, t.z);
+      if (this.mining && this.mining.p > 0) r.crack(t.x, t.y, t.z, Math.min(3, Math.floor(this.mining.p * 4)));
+    }
+    r.drawWater(w);
+    r.drawClouds();
+    if (!third && this.state === 'play' && !this.cinemaMode) {
+      const sl = this.slot(this.sel);
+      const bob = p.onGround ? Math.sin(p.walk * 3.2) * 0.03 * Math.min(1, Math.hypot(p.vx, p.vz) / 4) : 0;
+      if (sl) r.held(sl.id, this.swing, bob, L(p), 0);
+    }
   },
 };
-
-function soilHint(d) {
-  const s = d.plant.soil;
-  if (s === 'sand') return 'Cactus grows on sand.';
-  if (s === 'sandsoil') return 'Plant this on sand, grass or dirt.';
-  if (s === 'any') return 'Plant this on top of any solid block.';
-  return 'Seeds need grass, dirt or farmland below them.';
-}
 
 window.addEventListener('load', () => game.boot());

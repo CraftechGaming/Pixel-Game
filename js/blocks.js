@@ -768,209 +768,366 @@ function buildTextures() {
   });
 }
 
-// --- block registry -----------------------------------------------------------
+// --- extra textures for the 3D world: block tops, items and tools -------------------
+function paintRings(p, bark, inner, ring) {
+  for (let y = 0; y < TS; y++) for (let x = 0; x < TS; x++) {
+    const d = Math.max(Math.abs(x - 7.5), Math.abs(y - 7.5));
+    let c = d > 6.6 ? H(bark) : (Math.floor(d) % 3 === 0 ? H(ring) : H(inner));
+    p.set(x, y, shadeRgb(c, 0.94 + p.r() * 0.1));
+  }
+}
+function paintTool(p, kind, head, dark) {
+  const wood = H('#8b5e34'), wd = H('#5e3d22');
+  for (let k = 0; k < 10; k++) { p.set(3 + k, 13 - k, wood); p.set(3 + k, 14 - k, wd); }
+  const hc = H(head), hd = H(dark);
+  if (kind === 'pick') {
+    for (let x = 2; x < 14; x++) { const y = 2 + Math.round(((x - 8) ** 2) / 10); p.set(x, y, hc); p.set(x, y + 1, hd); }
+    p.set(9, 4, hc); p.set(10, 4, hd);
+  } else if (kind === 'axe') {
+    p.rect(9, 2, 4, 5, hc); p.rect(12, 1, 2, 7, hc); p.rect(9, 6, 4, 1, hd); p.rect(13, 2, 1, 5, hd);
+  } else if (kind === 'shovel') {
+    p.rect(10, 1, 4, 4, hc); p.rect(11, 0, 2, 1, hc); p.rect(10, 4, 4, 1, hd); p.rect(13, 1, 1, 3, hd);
+  }
+}
+
+function buildTextures3D() {
+  tex('grass_top', p => { p.noise(pal('#5fb83a', '#55ab33', '#68c242', '#4ea32f')); p.speck(H('#7fd457'), 10); });
+  tex('log_oak_top', p => paintRings(p, '#5a3d22', '#b8945f', '#9a7547'));
+  tex('log_birch_top', p => paintRings(p, '#e8e4d8', '#d7c48e', '#bba872'));
+  tex('log_pine_top', p => paintRings(p, '#3f2a18', '#8a6239', '#6e4c2b'));
+  tex('log_cherry_top', p => paintRings(p, '#4a2626', '#d99a8f', '#b97a70'));
+  tex('sandstone_top', p => { p.noise(pal('#e6d49c', '#dfcc92', '#ead9a6')); });
+  tex('craft_top', p => {
+    paintPlanks(p, '#b8945f');
+    p.rect(0, 0, 16, 1, H('#6e4829')); p.rect(0, 15, 16, 1, H('#6e4829')); p.rect(0, 0, 1, 16, H('#6e4829')); p.rect(15, 0, 1, 16, H('#6e4829'));
+    for (let k = 1; k < 4; k++) { p.rect(k * 4, 1, 1, 14, H('#7a5332')); p.rect(1, k * 4, 14, 1, H('#7a5332')); }
+  });
+  tex('craft_side', p => {
+    paintPlanks(p, '#9b6b3f');
+    p.rect(0, 0, 16, 3, H('#b98a58'));
+    p.rect(3, 6, 5, 2, H('#9aa3ab')); p.rect(7, 5, 1, 6, H('#5e3d22'));
+    p.rect(10, 6, 4, 2, H('#6f777e')); p.rect(11, 8, 1, 5, H('#5e3d22'));
+  });
+  tex('pumpkin_top', p => { p.noise(pal('#e8862a', '#e07d22')); p.rect(7, 6, 2, 3, H('#5b8a2e')); });
+  tex('cactus_side', p => {
+    p.noise(pal('#3e8f3a', '#388533', '#449a3f'));
+    for (let y = 0; y < 16; y++) { p.set(4, y, H('#5fb35a')); p.set(11, y, H('#5fb35a')); p.set(0, y, H('#2d6f2a')); p.set(15, y, H('#2d6f2a')); }
+    for (let y = 1; y < 16; y += 4) { p.set(2, y, H('#efe9bd')); p.set(13, y + 2, H('#efe9bd')); p.set(7, y + 1, H('#efe9bd')); }
+  });
+  tex('cactus_top', p => { p.noise(pal('#4ea34a', '#449a3f')); p.rect(0, 0, 16, 1, H('#2d6f2a')); p.rect(0, 15, 16, 1, H('#2d6f2a')); p.rect(0, 0, 1, 16, H('#2d6f2a')); p.rect(15, 0, 1, 16, H('#2d6f2a')); });
+  tex('hay_top', p => { p.noise(pal('#d9b44a', '#c9a23c', '#ecc964')); p.rect(7, 0, 2, 16, H('#a8452f')); });
+  tex('chest_side', p => {
+    paintPlanks(p, '#9b6b3f');
+    p.rect(0, 0, 16, 1, H('#5e3d22')); p.rect(0, 15, 16, 1, H('#5e3d22')); p.rect(0, 0, 1, 16, H('#5e3d22')); p.rect(15, 0, 1, 16, H('#5e3d22'));
+    p.rect(0, 5, 16, 1, H('#5e3d22')); p.rect(7, 4, 2, 4, H('#d8c35a'));
+  });
+  tex('chest_top', p => { paintPlanks(p, '#a77a48'); p.rect(0, 0, 16, 1, H('#5e3d22')); p.rect(0, 15, 16, 1, H('#5e3d22')); });
+  tex('bed_top', p => { p.fill(H('#c0392b')); p.rect(0, 0, 16, 5, H('#f1ede4')); p.rect(0, 5, 16, 1, H('#e05a48')); for (let x = 0; x < 16; x += 4) p.rect(x, 9, 2, 1, H('#a93226')); });
+  tex('bed_side', p => { p.fill(H('#c0392b')); p.rect(0, 9, 16, 7, H('#7a5332')); p.rect(0, 0, 4, 9, H('#f1ede4')); });
+  tex('boom_top', p => { p.noise(pal('#d43c2c', '#c93527')); p.rect(6, 6, 4, 4, H('#2a2a2a')); p.rect(7, 4, 2, 2, H('#8a8a8a')); });
+  tex('water', p => {
+    for (let y = 0; y < TS; y++) for (let x = 0; x < TS; x++) p.set(x, y, shadeRgb(H('#2f78d6'), 0.92 + p.r() * 0.12), 175);
+    for (let k = 0; k < 5; k++) { const y = p.ri(16), x = p.ri(12); p.rect(x, y, 4, 1, H('#8fc7ff'), 190); }
+  });
+  tex('conveyor', p => {
+    p.fill(H('#2d3440'));
+    p.rect(0, 0, 1, 16, H('#ffcf3a')); p.rect(15, 0, 1, 16, H('#ffcf3a'));
+    for (const oy of [1, 9]) for (let k = 0; k < 5; k++) { p.set(3 + k, oy + 4 - k, H('#ffcf3a')); p.set(12 - k, oy + 4 - k, H('#ffcf3a')); p.set(3 + k, oy + 5 - k, H('#ff9f1a')); p.set(12 - k, oy + 5 - k, H('#ff9f1a')); }
+  });
+  tex('check_pad', p => {
+    p.fill(H('#1f6f8b')); p.rect(1, 1, 14, 14, H('#33b5d6')); p.rect(3, 3, 10, 10, H('#7ee7ff'));
+    p.rect(6, 6, 4, 4, H('#ffffff'));
+  });
+  tex('finish_pad', p => { for (let y = 0; y < TS; y++) for (let x = 0; x < TS; x++) p.set(x, y, ((x >> 2) + (y >> 2)) % 2 ? H('#111111') : H('#f4f4f4')); });
+  tex('gate', p => {
+    for (let y = 0; y < TS; y++) for (let x = 0; x < TS; x++) p.set(x, y, H('#ff5d8f'), 120);
+    p.rect(0, 0, 16, 2, H('#ffffff'), 220); p.rect(0, 14, 16, 2, H('#ffffff'), 220);
+    for (let k = 0; k < 16; k += 4) p.rect(k, 2, 2, 12, H('#ffd0e0'), 170);
+  });
+  tex('snow_layer', p => p.noise(pal('#f4f8ff', '#e9f1fb', '#ffffff')));
+
+  // materials and food
+  tex('stick', p => { for (let k = 0; k < 11; k++) { p.set(3 + k, 13 - k, H('#8b5e34')); p.set(4 + k, 13 - k, H('#5e3d22')); } });
+  tex('coal', p => { blob(p, 8, 9, 4, pal('#2b2b2e', '#3a3a40', '#1f1f22')); p.set(6, 7, H('#5a5a64')); });
+  tex('iron_ingot', p => { for (let y = 6; y < 11; y++) p.rect(3 + (10 - y) * 0, y, 11, 1, y === 6 ? H('#f2f4f6') : H('#c9ced3')); p.rect(3, 10, 11, 1, H('#8e979f')); p.rect(4, 7, 3, 1, H('#ffffff')); });
+  tex('gold_ingot', p => { for (let y = 6; y < 11; y++) p.rect(3, y, 11, 1, y === 6 ? H('#fff1a8') : H('#f2c94c')); p.rect(3, 10, 11, 1, H('#c9962a')); p.rect(4, 7, 3, 1, H('#ffffff')); });
+  tex('gem', p => {
+    for (let y = 3; y < 13; y++) { const w = y < 7 ? y - 2 : 13 - y; for (let x = 8 - w; x <= 7 + w; x++) p.set(x, y, x < 8 ? H('#7ff0e5') : H('#36c2b6')); }
+    p.set(6, 5, H('#ffffff'));
+  });
+  tex('wheat_item', p => { for (const x of [5, 8, 11]) { stem(p, x, 6, 15, H('#c9a23c')); p.rect(x - 1, 2, 2, 5, H('#e8c45a')); } });
+  tex('seeds', p => { [[5, 9], [8, 7], [10, 10], [7, 11], [11, 6], [4, 6]].forEach(([x, y]) => { p.rect(x, y, 2, 2, H('#8fb04a')); p.set(x, y, H('#c4dc7a')); }); });
+  tex('apple', p => { blob(p, 8, 9, 5, pal('#d6283a', '#c21f30')); p.rect(8, 2, 1, 3, H('#5e3d22')); p.rect(9, 3, 3, 2, H('#4fa52f')); p.rect(5, 7, 2, 2, H('#ff8a8a')); });
+  tex('bread', p => { for (let y = 6; y < 12; y++) p.rect(2 + Math.abs(9 - y) * 0, y, 12, 1, y === 6 ? H('#e8b56a') : H('#c98a3c')); p.rect(3, 5, 10, 1, H('#d9a058')); [4, 8, 12].forEach(x => p.set(x, 7, H('#a46a2a'))); });
+  tex('bucket', p => {
+    for (let y = 5; y < 15; y++) { const inset = Math.floor((y - 5) / 4); p.rect(3 + inset, y, 10 - inset * 2, 1, H('#9aa3ab')); }
+    p.rect(4, 5, 8, 2, H('#3a3f45')); p.rect(3, 4, 10, 1, H('#6f777e'));
+    p.set(3, 2, H('#6f777e')); p.set(4, 1, H('#6f777e')); p.rect(5, 0, 6, 1, H('#6f777e')); p.set(11, 1, H('#6f777e')); p.set(12, 2, H('#6f777e'));
+  });
+  const MATS = { wood: ['#a77a48', '#7a5332'], stone: ['#9aa0a6', '#62676c'], iron: ['#e3e7eb', '#a3abb3'], gem: ['#56e6d8', '#2fa89d'] };
+  for (const [m, [a, b]] of Object.entries(MATS)) for (const k of ['pick', 'axe', 'shovel']) tex(`${k}_${m}`, p => paintTool(p, k, a, b));
+
+  // hud
+  const heart = (p, fill, half) => {
+    const shape = ['..XX..XX..', '.XXXXXXXX.', 'XXXXXXXXXX', 'XXXXXXXXXX', '.XXXXXXXX.', '..XXXXXX..', '...XXXX...', '....XX....'];
+    shape.forEach((row, y) => [...row].forEach((ch, x) => {
+      if (ch !== 'X') return;
+      const inside = fill && (!half || x < 5);
+      p.set(x + 3, y + 4, inside ? (y < 2 && x > 1 && x < 4 ? H('#ff9a9a') : H('#e8333d')) : H('#3a1f24'));
+    }));
+  };
+  tex('ui_heart', p => heart(p, true, false));
+  tex('ui_heart_half', p => heart(p, true, true));
+  tex('ui_heart_empty', p => heart(p, false, false));
+  tex('ui_bubble', p => { blob(p, 8, 8, 4, pal('#8fd0ff')); p.rect(6, 6, 2, 2, H('#ffffff')); });
+  tex('ui_crown', p => {
+    p.rect(2, 7, 12, 6, H('#f2c94c')); p.rect(2, 12, 12, 1, H('#c9962a'));
+    [[2, 3], [7, 2], [12, 3]].forEach(([x, y]) => p.rect(x, y, 2, 5, H('#f2c94c')));
+    p.set(8, 9, H('#d6283a')); p.set(4, 9, H('#36c2b6')); p.set(11, 9, H('#36c2b6'));
+  });
+  tex('ui_hammer', p => { for (let k = 0; k < 9; k++) p.rect(3 + k, 13 - k, 2, 1, H('#8b5e34')); p.rect(8, 1, 6, 4, H('#9aa3ab')); p.rect(8, 4, 6, 1, H('#6f777e')); });
+  tex('ui_mine', p => paintTool(p, 'pick', '#cfd5da', '#8e979f'));
+  tex('ui_jump', p => { for (let k = 0; k < 6; k++) p.rect(8 - k, 3 + k, 1 + k * 2 - 1 + 1, 1, H('#f4efe1')); p.rect(6, 9, 4, 5, H('#f4efe1')); });
+  tex('ui_camera', p => { p.rect(2, 5, 12, 8, H('#cfd5da')); p.rect(5, 3, 4, 2, H('#cfd5da')); blob(p, 8, 9, 2, pal('#2a2622')); });
+}
+
+// --- block & item registry -------------------------------------------------------
+// Faces: 0 +x, 1 -x, 2 +y (top), 3 -y (bottom), 4 +z, 5 -z
 const BLOCKS = [];
 const B = {};
 const CATEGORIES = [
-  { id: 'all', name: 'All' },
-  { id: 'build', name: 'Building' },
-  { id: 'nature', name: 'Nature' },
-  { id: 'plants', name: 'Plants & Seeds' },
-  { id: 'furniture', name: 'Home' },
-  { id: 'light', name: 'Lights' },
-  { id: 'color', name: 'Colors' },
-  { id: 'fun', name: 'Water & Parkour' },
+  { id: 'all', name: 'All' }, { id: 'build', name: 'Building' }, { id: 'nature', name: 'Nature' },
+  { id: 'plants', name: 'Plants' }, { id: 'home', name: 'Home' }, { id: 'light', name: 'Lights' },
+  { id: 'color', name: 'Colors' }, { id: 'fun', name: 'Water & Parkour' }, { id: 'items', name: 'Tools & Items' },
 ];
 
-function def(key, name, props = {}) {
+function def(key, name, p = {}) {
   const d = Object.assign({
-    id: BLOCKS.length, key, name, cat: 'build',
-    solid: true, opaque: true, light: 0, hardness: 0.3, sound: 'stone',
-    tex: [key], render: 'tile', atten: 0,
-  }, props);
-  if (!props.icon) d.icon = d.tex[d.tex.length - 1];
+    id: BLOCKS.length, key, name, cat: 'build', solid: true, opaque: true, shape: 'cube',
+    light: 0, hardness: 1, tool: null, tier: 0, drop: key, sound: 'stone', stack: 64,
+  }, p);
+  if (typeof d.tex === 'string' || !d.tex) d.tex = { all: d.tex || key };
   BLOCKS.push(d); B[key] = d.id;
   return d;
 }
-const deco = (key, name, props = {}) => def(key, name, Object.assign({ solid: false, opaque: false, cat: 'furniture', sound: 'wood', hardness: 0.15 }, props));
-const plantDef = (key, name, stages, plant, props = {}) => {
-  const tex = stages === 1 ? [key] : Array.from({ length: stages }, (_, i) => key + i);
-  return def(key, name, Object.assign({
-    solid: false, opaque: false, cat: 'plants', sound: 'plant', hardness: 0.05,
-    render: 'plant', tex, plant: Object.assign({ stages, soil: 'soil', time: 12, final: 'stay' }, plant),
-  }, props));
-};
+const plantDef = (key, name, p = {}) => def(key, name, Object.assign({
+  cat: 'plants', solid: false, opaque: false, shape: 'cross', hardness: 0, sound: 'plant', plant: true,
+}, p));
+const itemDef = (key, name, p = {}) => def(key, name, Object.assign({
+  cat: 'items', solid: false, opaque: false, shape: 'none', item: true, hardness: 0,
+}, p));
 
 function defineBlocks() {
-  def('air', 'Air', { solid: false, opaque: false, render: 'none', cat: 'hidden', tex: ['dirt'] });
+  def('air', 'Air', { solid: false, opaque: false, shape: 'none', cat: 'hidden', tex: 'dirt', drop: null });
   // nature
-  def('grass', 'Grass', { cat: 'nature', sound: 'dirt', hardness: 0.2, soil: true });
-  def('dirt', 'Dirt', { cat: 'nature', sound: 'dirt', hardness: 0.18, soil: true });
-  def('stone', 'Stone', { cat: 'nature' });
-  def('cobble', 'Cobblestone', { cat: 'build' });
-  def('sand', 'Sand', { cat: 'nature', sound: 'sand', hardness: 0.15, fall: true, sandy: true });
-  def('sandstone', 'Sandstone', { cat: 'build' });
-  def('gravel', 'Gravel', { cat: 'nature', sound: 'sand', hardness: 0.18, fall: true });
-  def('clay', 'Clay', { cat: 'nature', sound: 'dirt', hardness: 0.18 });
-  def('snow', 'Snow', { cat: 'nature', sound: 'snow', hardness: 0.12 });
-  def('snowgrass', 'Snowy Grass', { cat: 'nature', sound: 'snow', hardness: 0.2, soil: true });
-  def('ice', 'Ice', { cat: 'nature', sound: 'glass', opaque: false, slip: true, hardness: 0.15 });
-  def('bedrock', 'Bedrock', { cat: 'hidden', hardness: Infinity });
-  def('darkstone', 'Deep Stone', { cat: 'nature', hardness: 0.4 });
-  def('basalt', 'Basalt', { cat: 'nature', hardness: 0.35 });
-  def('coal_ore', 'Coal Ore', { cat: 'nature', hardness: 0.35 });
-  def('iron_ore', 'Iron Ore', { cat: 'nature', hardness: 0.4 });
-  def('gold_ore', 'Gold Ore', { cat: 'nature', hardness: 0.4 });
-  def('gem_ore', 'Gem Ore', { cat: 'nature', hardness: 0.45 });
-  for (const t of ['oak', 'birch', 'pine', 'cherry', 'palm']) {
+  const dirtish = { cat: 'nature', sound: 'dirt', hardness: 0.55, tool: 'shovel' };
+  def('grass', 'Grass Block', Object.assign({}, dirtish, { tex: { top: 'grass_top', side: 'grass', bottom: 'dirt' }, drop: 'dirt', hardness: 0.6, soil: true }));
+  def('dirt', 'Dirt', Object.assign({}, dirtish, { soil: true }));
+  def('farmland', 'Farmland', Object.assign({}, dirtish, { tex: { top: 'farmland', side: 'dirt', bottom: 'dirt' }, soil: true, drop: 'dirt' }));
+  def('sand', 'Sand', Object.assign({}, dirtish, { sound: 'sand', sandy: true }));
+  def('gravel', 'Gravel', Object.assign({}, dirtish, { sound: 'sand' }));
+  def('clay', 'Clay', Object.assign({}, dirtish));
+  def('path', 'Dirt Path', Object.assign({}, dirtish, { tex: { top: 'path', side: 'dirt', bottom: 'dirt' }, drop: 'dirt', soil: true }));
+  def('snowgrass', 'Snowy Grass', Object.assign({}, dirtish, { tex: { top: 'snow', side: 'snowgrass', bottom: 'dirt' }, drop: 'dirt', soil: true, sound: 'snow' }));
+  def('snow', 'Snow', Object.assign({}, dirtish, { sound: 'snow', hardness: 0.4 }));
+  const rock = { cat: 'nature', tool: 'pick', tier: 1, hardness: 1.2 };
+  def('stone', 'Stone', Object.assign({}, rock, { drop: 'cobble' }));
+  def('cobble', 'Cobblestone', Object.assign({}, rock, { cat: 'build', hardness: 1.4 }));
+  def('sandstone', 'Sandstone', Object.assign({}, rock, { cat: 'build', tex: { top: 'sandstone_top', side: 'sandstone', bottom: 'sandstone_top' }, hardness: 0.9 }));
+  def('ice', 'Ice', { cat: 'nature', opaque: false, sound: 'glass', hardness: 0.4, slip: true, drop: null });
+  def('bedrock', 'Bedrock', { cat: 'hidden', hardness: Infinity, drop: null });
+  def('darkstone', 'Deep Stone', Object.assign({}, rock, { hardness: 1.6 }));
+  def('basalt', 'Basalt', Object.assign({}, rock));
+  def('coal_ore', 'Coal Ore', Object.assign({}, rock, { hardness: 1.5, drop: 'coal' }));
+  def('iron_ore', 'Iron Ore', Object.assign({}, rock, { hardness: 1.8, tier: 2 }));
+  def('gold_ore', 'Gold Ore', Object.assign({}, rock, { hardness: 1.8, tier: 3 }));
+  def('gem_ore', 'Gem Ore', Object.assign({}, rock, { hardness: 2, tier: 3, drop: 'gem' }));
+  const wood = { cat: 'nature', tool: 'axe', hardness: 1, sound: 'wood' };
+  for (const t of ['oak', 'birch', 'pine', 'cherry']) {
     const n = t[0].toUpperCase() + t.slice(1);
-    def('log_' + t, n + ' Log', { cat: 'nature', sound: 'wood', hardness: 0.25 });
+    def('log_' + t, n + ' Log', Object.assign({}, wood, { tex: { top: 'log_' + t + '_top', side: 'log_' + t, bottom: 'log_' + t + '_top' } }));
   }
-  for (const t of ['oak', 'birch', 'pine', 'cherry', 'palm', 'rainbow']) {
+  for (const t of ['oak', 'birch', 'pine', 'cherry']) {
     const n = t[0].toUpperCase() + t.slice(1);
-    def('leaves_' + t, n + ' Leaves', { cat: 'nature', sound: 'plant', opaque: false, hardness: 0.08, atten: 1, leaves: true });
+    def('leaves_' + t, n + ' Leaves', { cat: 'nature', opaque: false, leaves: true, hardness: 0.2, sound: 'plant', drop: null, sapling: 'sapling_' + t });
   }
-  def('mushroom_cap', 'Mushroom Cap', { cat: 'nature', sound: 'cloth', hardness: 0.12 });
-  def('mushroom_stem', 'Mushroom Stem', { cat: 'nature', sound: 'cloth', hardness: 0.12 });
-  def('crystal', 'Crystal', { cat: 'light', sound: 'glass', opaque: false, light: 11, glow: 'violet', hardness: 0.2 });
-  def('farmland', 'Farmland', { cat: 'plants', sound: 'dirt', hardness: 0.18, soil: true, farm: true });
-  def('path', 'Dirt Path', { cat: 'nature', sound: 'dirt', hardness: 0.18, soil: true });
+  def('leaves_rainbow', 'Rainbow Leaves', { cat: 'nature', opaque: false, leaves: true, hardness: 0.2, sound: 'plant' });
+  def('cactus', 'Cactus', { cat: 'nature', tex: { top: 'cactus_top', side: 'cactus_side', bottom: 'cactus_top' }, hardness: 0.4, sound: 'cloth', hurt: 1 });
+  def('mushroom_cap', 'Mushroom Cap', { cat: 'nature', hardness: 0.3, sound: 'cloth', tool: 'axe' });
+  def('mushroom_stem', 'Mushroom Stem', { cat: 'nature', hardness: 0.3, sound: 'cloth', tool: 'axe' });
+  def('crystal', 'Crystal', { cat: 'light', opaque: false, shape: 'cross', solid: false, light: 11, hardness: 0.6, tool: 'pick', sound: 'glass' });
+  def('water', 'Water', { cat: 'fun', solid: false, opaque: false, shape: 'liquid', liquid: true, hardness: Infinity, drop: null, sound: 'water' });
+  def('lava', 'Lava', { cat: 'fun', solid: false, opaque: true, shape: 'cube', tex: 'lava0', liquid: true, light: 14, hurt: 4, hardness: Infinity, drop: null, sound: 'water' });
 
   // building
-  for (const t of ['oak', 'birch', 'pine', 'cherry', 'dark']) {
-    const n = t[0].toUpperCase() + t.slice(1);
-    def('planks_' + t, n + ' Planks', { sound: 'wood', hardness: 0.22 });
-  }
-  def('bricks', 'Bricks');
-  def('stonebricks', 'Stone Bricks');
-  def('sandbricks', 'Sand Bricks');
-  def('glass', 'Glass', { opaque: false, sound: 'glass', hardness: 0.1 });
-  def('window', 'Wood Window', { opaque: false, sound: 'glass', hardness: 0.12 });
-  def('cityglass', 'Blue Glass', { opaque: false, sound: 'glass', hardness: 0.12 });
-  def('litwindow', 'Lit Window', { cat: 'light', opaque: false, sound: 'glass', light: 10, glow: 'warm', hardness: 0.12 });
-  def('roof_red', 'Red Roof');
-  def('roof_blue', 'Blue Roof');
-  def('roof_green', 'Green Roof');
-  def('roof_dark', 'Slate Roof');
-  def('plaster', 'White Plaster');
-  def('concrete_gray', 'Gray Concrete', { cat: 'color' });
-  def('concrete_white', 'White Concrete', { cat: 'color' });
-  def('concrete_dark', 'Dark Concrete', { cat: 'color' });
-  def('concrete_sand', 'Tan Concrete', { cat: 'color' });
-  def('asphalt', 'Asphalt');
-  def('road', 'Road');
-  def('metal', 'Metal', { sound: 'metal', hardness: 0.35 });
-  def('gold_block', 'Gold Block', { sound: 'metal' });
-  def('gem_block', 'Gem Block', { sound: 'glass' });
-  def('hay', 'Hay Bale', { sound: 'plant', hardness: 0.12 });
-  def('platform', 'Wood Platform', { opaque: false, platform: true, sound: 'wood', hardness: 0.12 });
+  const plank = { hardness: 0.9, tool: 'axe', sound: 'wood' };
+  for (const t of ['oak', 'birch', 'pine', 'cherry', 'dark']) def('planks_' + t, t[0].toUpperCase() + t.slice(1) + ' Planks', Object.assign({}, plank, { group: 'planks' }));
+  const brick = { tool: 'pick', tier: 1, hardness: 1.3 };
+  def('bricks', 'Bricks', brick);
+  def('stonebricks', 'Stone Bricks', brick);
+  def('sandbricks', 'Sand Bricks', brick);
+  def('glass', 'Glass', { opaque: false, sound: 'glass', hardness: 0.3, drop: null });
+  def('window', 'Wood Window', { opaque: false, sound: 'glass', hardness: 0.3 });
+  def('cityglass', 'Blue Glass', { opaque: false, sound: 'glass', hardness: 0.3 });
+  def('litwindow', 'Lit Window', { cat: 'light', opaque: false, light: 11, sound: 'glass', hardness: 0.3 });
+  for (const [k, n] of [['roof_red', 'Red Roof'], ['roof_blue', 'Blue Roof'], ['roof_green', 'Green Roof'], ['roof_dark', 'Slate Roof']]) def(k, n, brick);
+  def('plaster', 'White Plaster', { hardness: 0.8, tool: 'pick' });
+  def('concrete_gray', 'Gray Concrete', Object.assign({ cat: 'color' }, brick));
+  def('concrete_white', 'White Concrete', Object.assign({ cat: 'color' }, brick));
+  def('concrete_dark', 'Dark Concrete', Object.assign({ cat: 'color' }, brick));
+  def('asphalt', 'Asphalt', brick);
+  def('road', 'Road', Object.assign({ tex: { top: 'road', side: 'asphalt', bottom: 'asphalt' } }, brick));
+  def('metal', 'Metal', { tool: 'pick', tier: 1, hardness: 1.6, sound: 'metal' });
+  def('gold_block', 'Gold Block', { tool: 'pick', tier: 2, hardness: 1.6, sound: 'metal' });
+  def('gem_block', 'Gem Block', { tool: 'pick', tier: 2, hardness: 1.6, sound: 'glass' });
+  def('hay', 'Hay Bale', { tex: { top: 'hay_top', side: 'hay', bottom: 'hay_top' }, hardness: 0.4, sound: 'plant' });
+  def('pumpkin', 'Pumpkin', { cat: 'plants', tex: { top: 'pumpkin_top', side: 'pumpkin', bottom: 'pumpkin_top' }, hardness: 0.6, tool: 'axe', sound: 'plant' });
+  def('melon', 'Melon', { cat: 'plants', hardness: 0.6, tool: 'axe', sound: 'plant' });
   for (const [k, n] of [['white', 'White'], ['red', 'Red'], ['orange', 'Orange'], ['yellow', 'Yellow'], ['green', 'Green'], ['blue', 'Blue'], ['purple', 'Purple'], ['pink', 'Pink'], ['black', 'Black']]) {
-    def('cloth_' + k, n + ' Cloth', { cat: 'color', sound: 'cloth', hardness: 0.12 });
+    def('cloth_' + k, n + ' Cloth', { cat: 'color', hardness: 0.4, sound: 'cloth' });
   }
 
-  // home & furniture (walk-through decorations)
-  def('door', 'Door', { solid: false, opaque: false, cat: 'furniture', sound: 'wood', render: 'door', tex: ['door_b', 'door_b_open'], icon: 'icon_door', door: 'bottom', hardness: 0.15 });
-  def('door_top', 'Door', { solid: false, opaque: false, cat: 'hidden', sound: 'wood', render: 'door', tex: ['door_t', 'door_t_open'], icon: 'icon_door', door: 'top', hardness: 0.15 });
-  deco('bed', 'Bed', { bed: true, sound: 'cloth' });
-  deco('table', 'Table');
-  deco('chair', 'Chair');
-  deco('bookshelf', 'Bookshelf');
-  deco('chest', 'Chest');
-  deco('workbench', 'Workbench');
-  deco('flowerpot', 'Flower Pot', { sound: 'stone' });
-  deco('fence', 'Fence');
-  deco('ladder', 'Ladder', { climb: true });
+  // home
+  def('workbench', 'Workbench', { cat: 'home', tex: { top: 'craft_top', side: 'craft_side', bottom: 'planks_oak' }, hardness: 1, tool: 'axe', sound: 'wood' });
+  def('bookshelf', 'Bookshelf', { cat: 'home', tex: { top: 'planks_oak', side: 'bookshelf', bottom: 'planks_oak' }, hardness: 0.8, tool: 'axe', sound: 'wood' });
+  def('chest', 'Chest', { cat: 'home', shape: 'box', box: [1, 0, 1, 15, 14, 15], opaque: false, tex: { top: 'chest_top', side: 'chest_side', bottom: 'chest_top' }, hardness: 1, tool: 'axe', sound: 'wood' });
+  def('bed', 'Bed', { cat: 'home', shape: 'box', box: [0, 0, 0, 16, 9, 16], opaque: false, tex: { top: 'bed_top', side: 'bed_side', bottom: 'planks_oak' }, hardness: 0.5, sound: 'cloth', bed: true });
+  def('door', 'Door', { cat: 'home', shape: 'panel', solid: false, opaque: false, tex: 'door_b', icon: 'icon_door', hardness: 0.8, tool: 'axe', sound: 'wood', door: 'bottom' });
+  def('door_top', 'Door', { cat: 'hidden', shape: 'panel', solid: false, opaque: false, tex: 'door_t', hardness: 0.8, tool: 'axe', sound: 'wood', door: 'top', drop: 'door' });
+  def('ladder', 'Ladder', { cat: 'home', solid: false, opaque: false, climb: true, shape: 'panel', hardness: 0.4, tool: 'axe', sound: 'wood' });
+  def('fence', 'Fence', { cat: 'home', shape: 'box', box: [6, 0, 6, 10, 16, 10], opaque: false, hardness: 0.8, tool: 'axe', sound: 'wood' });
+  def('flowerpot', 'Flower Pot', { cat: 'home', shape: 'cross', solid: false, opaque: false, hardness: 0.1, sound: 'stone' });
 
   // lights
-  deco('torch', 'Torch', { cat: 'light', light: 14, glow: 'warm', render: 'torch', hardness: 0.05 });
-  deco('lantern', 'Lantern', { cat: 'light', light: 15, glow: 'warm', sound: 'metal' });
-  def('glowblock', 'Glow Block', { cat: 'light', light: 15, glow: 'warm', sound: 'glass' });
-  def('neon_pink', 'Pink Neon', { cat: 'light', light: 12, glow: 'pink', sound: 'glass' });
-  def('neon_cyan', 'Cyan Neon', { cat: 'light', light: 12, glow: 'cyan', sound: 'glass' });
-  deco('streetlamp', 'Street Lamp', { cat: 'light', light: 15, glow: 'warm', sound: 'metal' });
-  deco('lamppost', 'Lamp Pole', { cat: 'light', sound: 'metal' });
-  deco('redlight', 'Signal Light', { cat: 'light', light: 9, glow: 'red', sound: 'metal' });
+  def('torch', 'Torch', { cat: 'light', shape: 'box', box: [7, 0, 7, 9, 10, 9], solid: false, opaque: false, light: 14, hardness: 0, sound: 'wood', torch: true });
+  def('lantern', 'Lantern', { cat: 'light', shape: 'box', box: [4, 0, 4, 12, 13, 12], solid: false, opaque: false, light: 15, hardness: 0.4, sound: 'metal' });
+  def('glowblock', 'Glow Block', { cat: 'light', light: 15, hardness: 0.4, sound: 'glass' });
+  def('neon_pink', 'Pink Neon', { cat: 'light', light: 12, hardness: 0.4, sound: 'glass' });
+  def('neon_cyan', 'Cyan Neon', { cat: 'light', light: 12, hardness: 0.4, sound: 'glass' });
+  def('streetlamp', 'Street Lamp', { cat: 'light', light: 15, hardness: 0.6, sound: 'metal', tex: { top: 'metal', side: 'glowblock', bottom: 'glowblock' } });
 
   // plants & seeds
-  plantDef('wheat', 'Wheat Seeds', 4, { time: 10 });
-  plantDef('carrot', 'Carrot Seeds', 4, { time: 10 });
-  plantDef('corn', 'Corn Seeds', 4, { time: 11 });
-  plantDef('tomato', 'Tomato Seeds', 4, { time: 11 });
-  plantDef('berrybush', 'Berry Bush', 3, { time: 12 });
-  plantDef('pumpkin_plant', 'Pumpkin Seeds', 3, { time: 12, final: { block: 'pumpkin' } });
-  plantDef('melon_plant', 'Melon Seeds', 3, { time: 12, final: { block: 'melon' } });
-  for (const [k, n] of [['rose', 'Rose'], ['tulip', 'Tulip'], ['daisy', 'Daisy'], ['bluebell', 'Bluebell'], ['sunflower', 'Sunflower']]) {
-    plantDef(k, n + ' Seeds', 3, { time: 8 }, { flower: true });
-  }
-  for (const [k, n] of [['oak', 'Oak'], ['birch', 'Birch'], ['pine', 'Pine'], ['cherry', 'Cherry'], ['palm', 'Palm']]) {
-    plantDef('sap_' + k, n + ' Sapling', 2, { time: 12, final: { tree: k }, soil: k === 'palm' ? 'sandsoil' : 'soil' });
-  }
-  plantDef('mushroom', 'Mushroom', 2, { time: 14, soil: 'any', final: { struct: 'mushroom' } });
-  plantDef('sugarcane', 'Sugar Cane', 1, { time: 9, soil: 'sandsoil', final: { stack: 4 } });
-  plantDef('bamboo', 'Bamboo', 1, { time: 6, final: { stack: 8 } });
-  plantDef('cactus', 'Cactus', 1, { time: 12, soil: 'sand', final: { stack: 3 } }, { solid: true, render: 'tile', sound: 'cloth', hardness: 0.1 });
-  plantDef('wonder', 'Wonder Seed', 3, { time: 7, soil: 'any', final: { struct: 'wonder' } }, { icon: 'icon_wonder', light: 6, glow: 'violet' });
-  plantDef('houseseed', 'House Seed', 2, { time: 7, final: { struct: 'house' } }, { icon: 'icon_house_seed' });
-  plantDef('towerseed', 'Tower Seed', 2, { time: 7, final: { struct: 'tower' } }, { icon: 'icon_tower_seed' });
-  plantDef('tallgrass', 'Tall Grass', 1, { time: 0, final: 'none' }, { replaceable: true, cat: 'nature' });
-  plantDef('deadbush', 'Dry Bush', 1, { time: 0, soil: 'any', final: 'none' }, { replaceable: true, cat: 'nature' });
-  def('pumpkin', 'Pumpkin', { cat: 'plants', sound: 'plant', hardness: 0.12 });
-  def('melon', 'Melon', { cat: 'plants', sound: 'plant', hardness: 0.12 });
-  def('fertilizer', 'Fertilizer', { cat: 'plants', item: true, solid: false, opaque: false, render: 'none', tex: ['icon_fertilizer'] });
+  for (const [k, n] of [['tallgrass', 'Tall Grass'], ['deadbush', 'Dry Bush']]) plantDef(k, n, { cat: 'nature', drop: null, replaceable: true });
+  for (const [k, n] of [['rose', 'Rose'], ['tulip', 'Tulip'], ['daisy', 'Daisy'], ['bluebell', 'Bluebell'], ['sunflower', 'Sunflower']]) plantDef(k, n, { tex: k + '2', flower: true });
+  plantDef('mushroom', 'Mushroom', { tex: 'mushroom1', soil: 'any', grow: { time: 40, into: 'mushroom' } });
+  plantDef('wheat', 'Wheat', { tex: 'wheat3', stages: ['wheat0', 'wheat1', 'wheat2', 'wheat3'], grow: { time: 25 }, drop: null, crop: true, cat: 'hidden' });
+  for (const [k, n] of [['oak', 'Oak'], ['birch', 'Birch'], ['pine', 'Pine'], ['cherry', 'Cherry']]) plantDef('sapling_' + k, n + ' Sapling', { tex: 'sap_' + k + '1', grow: { time: 45, into: k } });
+  plantDef('houseseed', 'House Seed', { tex: 'houseseed1', icon: 'icon_house_seed', grow: { time: 8, into: 'house' } });
+  plantDef('wonderseed', 'Wonder Seed', { tex: 'wonder2', icon: 'icon_wonder', light: 6, grow: { time: 8, into: 'wonder' } });
 
   // water & parkour
-  def('water', 'Water', { cat: 'fun', solid: false, opaque: false, liquid: true, render: 'water', tex: ['icon_bucket'], atten: 1, sound: 'water', hardness: 0.01 });
-  def('lava', 'Lava', { cat: 'fun', solid: false, opaque: true, hurt: true, render: 'lava', tex: ['lava0', 'lava1', 'lava2', 'lava3'], icon: 'lava0', light: 13, glow: 'lava', sound: 'water', hardness: 0.05 });
-  def('spring', 'Water Spring', { cat: 'fun', spring: true });
-  def('sponge', 'Sponge', { cat: 'fun', sound: 'cloth', hardness: 0.12, sponge: true });
-  def('bounce', 'Bounce Pad', { cat: 'fun', opaque: false, bounce: true, sound: 'cloth', hardness: 0.12 });
-  def('boost', 'Speed Pad', { cat: 'fun', boost: true, render: 'anim', tex: ['boost0', 'boost1'], icon: 'boost0', sound: 'metal' });
-  def('crumble', 'Crumble Block', { cat: 'fun', crumble: true, render: 'crumble', sound: 'sand', hardness: 0.1 });
-  def('cloud', 'Cloud', { cat: 'fun', opaque: false, sound: 'cloth', hardness: 0.08 });
-  deco('flag_start', 'Start Flag', { cat: 'fun', flag: 'start', render: 'flag', sound: 'cloth' });
-  deco('flag_check', 'Checkpoint', { cat: 'fun', flag: 'check', render: 'flag', sound: 'cloth' });
-  deco('flag_finish', 'Finish Flag', { cat: 'fun', flag: 'finish', render: 'flag', sound: 'cloth' });
-  def('boom', 'Boom Block', { cat: 'fun', boom: true, render: 'boom', sound: 'cloth', hardness: 0.1 });
+  def('bounce', 'Bounce Pad', { cat: 'fun', bounce: true, opaque: false, hardness: 0.4, sound: 'cloth' });
+  def('conveyor', 'Conveyor', { cat: 'fun', conveyor: true, tex: { top: 'conveyor', side: 'metal', bottom: 'metal' }, hardness: 0.6, sound: 'metal' });
+  def('crumble', 'Crumble Block', { cat: 'fun', crumble: true, hardness: 0.3, sound: 'sand' });
+  def('check_pad', 'Checkpoint Pad', { cat: 'fun', light: 8, hardness: 0.5, sound: 'metal' });
+  def('finish_pad', 'Finish Pad', { cat: 'fun', finish: true, hardness: 0.5, sound: 'metal' });
+  def('gate', 'Start Gate', { cat: 'hidden', opaque: false, hardness: Infinity, sound: 'glass', drop: null });
+  def('boom', 'Boom Block', { cat: 'fun', boom: true, tex: { top: 'boom_top', side: 'boom', bottom: 'boom_top' }, hardness: 0.3, sound: 'cloth' });
+  def('sponge', 'Sponge', { cat: 'fun', sponge: true, hardness: 0.4, sound: 'cloth' });
+
+  // items
+  itemDef('stick', 'Stick');
+  itemDef('coal', 'Coal');
+  itemDef('iron_ingot', 'Iron Ingot');
+  itemDef('gold_ingot', 'Gold Ingot');
+  itemDef('gem', 'Gem');
+  itemDef('wheat_item', 'Wheat');
+  itemDef('seeds', 'Wheat Seeds', { places: 'wheat', cat: 'plants' });
+  itemDef('apple', 'Apple', { food: 4 });
+  itemDef('bread', 'Bread', { food: 7 });
+  itemDef('bucket', 'Bucket', { stack: 16, bucket: 'empty' });
+  itemDef('water_bucket', 'Water Bucket', { tex: 'icon_bucket', stack: 1, bucket: 'water', cat: 'fun' });
+  itemDef('fertilizer', 'Fertilizer', { tex: 'icon_fertilizer', cat: 'plants' });
+  const tiers = [['wood', 'Wooden', 1, 2], ['stone', 'Stone', 2, 3.2], ['iron', 'Iron', 3, 4.5], ['gem', 'Gem', 4, 6.5]];
+  for (const [m, n, tier, speed] of tiers) {
+    itemDef(`pick_${m}`, `${n} Pickaxe`, { stack: 1, toolKind: 'pick', toolTier: tier, toolSpeed: speed });
+    itemDef(`axe_${m}`, `${n} Axe`, { stack: 1, toolKind: 'axe', toolTier: tier, toolSpeed: speed });
+    itemDef(`shovel_${m}`, `${n} Shovel`, { stack: 1, toolKind: 'shovel', toolTier: tier, toolSpeed: speed });
+  }
 }
 
-// Groups used for planting rules
-function isSoil(id, kind) {
-  const d = BLOCKS[id];
-  if (!d) return false;
-  if (kind === 'any') return d.solid && !d.liquid && !d.plant;
-  if (kind === 'sand') return !!d.sandy;
-  if (kind === 'sandsoil') return !!d.sandy || !!d.soil;
-  return !!d.soil;
-}
+// Recipes: "in" uses item keys or groups (planks, log).
+const GROUPS = {
+  planks: ['planks_oak', 'planks_birch', 'planks_pine', 'planks_cherry', 'planks_dark'],
+  log: ['log_oak', 'log_birch', 'log_pine', 'log_cherry'],
+};
+const RECIPES = [
+  { out: ['planks_oak', 4], in: [['log_oak', 1]], cat: 'Basics' },
+  { out: ['planks_birch', 4], in: [['log_birch', 1]], cat: 'Basics' },
+  { out: ['planks_pine', 4], in: [['log_pine', 1]], cat: 'Basics' },
+  { out: ['planks_cherry', 4], in: [['log_cherry', 1]], cat: 'Basics' },
+  { out: ['stick', 4], in: [['planks', 2]], cat: 'Basics' },
+  { out: ['torch', 4], in: [['coal', 1], ['stick', 1]], cat: 'Basics' },
+  { out: ['pick_wood', 1], in: [['planks', 3], ['stick', 2]], cat: 'Tools' },
+  { out: ['axe_wood', 1], in: [['planks', 3], ['stick', 2]], cat: 'Tools' },
+  { out: ['shovel_wood', 1], in: [['planks', 1], ['stick', 2]], cat: 'Tools' },
+  { out: ['pick_stone', 1], in: [['cobble', 3], ['stick', 2]], cat: 'Tools' },
+  { out: ['axe_stone', 1], in: [['cobble', 3], ['stick', 2]], cat: 'Tools' },
+  { out: ['shovel_stone', 1], in: [['cobble', 1], ['stick', 2]], cat: 'Tools' },
+  { out: ['pick_iron', 1], in: [['iron_ingot', 3], ['stick', 2]], cat: 'Tools' },
+  { out: ['axe_iron', 1], in: [['iron_ingot', 3], ['stick', 2]], cat: 'Tools' },
+  { out: ['shovel_iron', 1], in: [['iron_ingot', 1], ['stick', 2]], cat: 'Tools' },
+  { out: ['pick_gem', 1], in: [['gem', 3], ['stick', 2]], cat: 'Tools' },
+  { out: ['axe_gem', 1], in: [['gem', 3], ['stick', 2]], cat: 'Tools' },
+  { out: ['shovel_gem', 1], in: [['gem', 1], ['stick', 2]], cat: 'Tools' },
+  { out: ['bucket', 1], in: [['iron_ingot', 3]], cat: 'Tools' },
+  { out: ['iron_ingot', 1], in: [['iron_ore', 1], ['coal', 1]], cat: 'Smelt' },
+  { out: ['gold_ingot', 1], in: [['gold_ore', 1], ['coal', 1]], cat: 'Smelt' },
+  { out: ['glass', 2], in: [['sand', 2], ['coal', 1]], cat: 'Smelt' },
+  { out: ['stone', 4], in: [['cobble', 4], ['coal', 1]], cat: 'Smelt' },
+  { out: ['bricks', 4], in: [['clay', 4], ['coal', 1]], cat: 'Smelt' },
+  { out: ['bread', 1], in: [['wheat_item', 3]], cat: 'Food & Farm' },
+  { out: ['fertilizer', 4], in: [['wheat_item', 1], ['dirt', 1]], cat: 'Food & Farm' },
+  { out: ['cloth_white', 1], in: [['wheat_item', 4]], cat: 'Food & Farm' },
+  { out: ['hay', 1], in: [['wheat_item', 6]], cat: 'Food & Farm' },
+  { out: ['stonebricks', 4], in: [['stone', 4]], cat: 'Building' },
+  { out: ['sandstone', 1], in: [['sand', 4]], cat: 'Building' },
+  { out: ['sandbricks', 4], in: [['sandstone', 4]], cat: 'Building' },
+  { out: ['window', 2], in: [['glass', 2], ['stick', 1]], cat: 'Building' },
+  { out: ['roof_red', 4], in: [['bricks', 2], ['rose', 1]], cat: 'Building' },
+  { out: ['roof_blue', 4], in: [['bricks', 2], ['bluebell', 1]], cat: 'Building' },
+  { out: ['roof_dark', 4], in: [['cobble', 4]], cat: 'Building' },
+  { out: ['plaster', 4], in: [['sand', 2], ['clay', 2]], cat: 'Building' },
+  { out: ['metal', 1], in: [['iron_ingot', 4]], cat: 'Building' },
+  { out: ['gold_block', 1], in: [['gold_ingot', 4]], cat: 'Building' },
+  { out: ['gem_block', 1], in: [['gem', 4]], cat: 'Building' },
+  { out: ['door', 1], in: [['planks', 6]], cat: 'Home' },
+  { out: ['ladder', 3], in: [['stick', 7]], cat: 'Home' },
+  { out: ['fence', 3], in: [['planks', 2], ['stick', 4]], cat: 'Home' },
+  { out: ['workbench', 1], in: [['planks', 4]], cat: 'Home' },
+  { out: ['chest', 1], in: [['planks', 8]], cat: 'Home' },
+  { out: ['bookshelf', 1], in: [['planks', 6], ['wheat_item', 3]], cat: 'Home' },
+  { out: ['bed', 1], in: [['cloth_white', 3], ['planks', 3]], cat: 'Home' },
+  { out: ['lantern', 1], in: [['iron_ingot', 1], ['torch', 1]], cat: 'Home' },
+  { out: ['glowblock', 1], in: [['glass', 1], ['torch', 2]], cat: 'Home' },
+  { out: ['cloth_red', 1], in: [['cloth_white', 1], ['rose', 1]], cat: 'Colors' },
+  { out: ['cloth_orange', 1], in: [['cloth_white', 1], ['tulip', 1]], cat: 'Colors' },
+  { out: ['cloth_yellow', 1], in: [['cloth_white', 1], ['sunflower', 1]], cat: 'Colors' },
+  { out: ['cloth_blue', 1], in: [['cloth_white', 1], ['bluebell', 1]], cat: 'Colors' },
+  { out: ['cloth_green', 1], in: [['cloth_white', 1], ['cactus', 1]], cat: 'Colors' },
+  { out: ['cloth_black', 1], in: [['cloth_white', 1], ['coal', 1]], cat: 'Colors' },
+  { out: ['cloth_pink', 2], in: [['cloth_white', 1], ['cloth_red', 1]], cat: 'Colors' },
+  { out: ['cloth_purple', 2], in: [['cloth_red', 1], ['cloth_blue', 1]], cat: 'Colors' },
+  { out: ['houseseed', 1], in: [['planks', 16], ['glass', 4], ['door', 1]], cat: 'Magic' },
+  { out: ['wonderseed', 1], in: [['gem', 1], ['seeds', 1]], cat: 'Magic' },
+  { out: ['boom', 1], in: [['coal', 4], ['sand', 4]], cat: 'Magic' },
+];
 
 function buildAtlas() {
   const n = TEX.list.length;
   const rows = Math.ceil(n / TEX.cols);
   const c = document.createElement('canvas');
-  c.width = TEX.cols * TS; c.height = rows * TS;
+  c.width = TEX.cols * TS; c.height = Math.max(1, rows) * TS;
   const g = c.getContext('2d');
-  TEX.list.forEach((t, i) => {
-    const img = new ImageData(t.data, TS, TS);
-    g.putImageData(img, (i % TEX.cols) * TS, Math.floor(i / TEX.cols) * TS);
-  });
+  TEX.list.forEach((t, i) => g.putImageData(new ImageData(t.data, TS, TS), (i % TEX.cols) * TS, Math.floor(i / TEX.cols) * TS));
   TEX.atlas = c;
-  // darker, cooler copy for background walls
-  const b = document.createElement('canvas');
-  b.width = c.width; b.height = c.height;
-  const bg = b.getContext('2d');
-  bg.drawImage(c, 0, 0);
-  bg.globalCompositeOperation = 'source-atop';
-  bg.fillStyle = 'rgba(12,16,30,0.5)';
-  bg.fillRect(0, 0, b.width, b.height);
-  TEX.atlasBg = b;
+  TEX.rows = rows;
 }
-
 function texIndex(name) {
   const i = TEX.index[name];
   if (i === undefined) throw new Error('Missing texture ' + name);
   return i;
 }
-
 function makeIconURL(name) {
   if (TEX.icons[name]) return TEX.icons[name];
   const c = document.createElement('canvas');
@@ -979,24 +1136,41 @@ function makeIconURL(name) {
   TEX.icons[name] = c.toDataURL();
   return TEX.icons[name];
 }
+function itemIcon(id) { return makeIconURL(BLOCKS[id].icon); }
 
 function initBlocks() {
   buildTextures();
+  buildTextures3D();
   defineBlocks();
   buildAtlas();
-  for (const k of ['grass', 'dirt', 'stone', 'sand', 'sandstone', 'gravel', 'clay', 'snow', 'snowgrass', 'ice', 'bedrock', 'darkstone', 'basalt', 'coal_ore', 'iron_ore', 'gold_ore', 'gem_ore', 'farmland', 'path']) BLOCKS[B[k]].ground = true;
   for (const d of BLOCKS) {
-    d.ti = d.tex.map(texIndex);
+    const t = d.tex;
+    const side = t.side || t.all, top = t.top || t.all, bottom = t.bottom || t.all;
+    d.faces = [side, side, top, bottom, side, side].map(texIndex);
+    if (d.stages) d.stageTi = d.stages.map(texIndex);
+    if (!d.icon) d.icon = d.shape === 'cube' || d.shape === 'box' ? (t.side || t.all) : (t.all || t.side);
+    if (d.key === 'grass') d.icon = 'grass';
+    if (d.key === 'water') d.icon = 'icon_bucket';
     d.iconTi = texIndex(d.icon);
-    // average colour for the world map
-    const data = TEX.list[d.ti[d.ti.length - 1]].data;
-    let r = 0, g = 0, b = 0, n = 0;
-    for (let i = 0; i < data.length; i += 4) if (data[i + 3] > 100) { r += data[i]; g += data[i + 1]; b += data[i + 2]; n++; }
-    d.mapColor = n ? [r / n, g / n, b / n] : null;
+    const data = TEX.list[d.faces[2]].data;
+    let r = 0, g = 0, b = 0, k = 0;
+    for (let i = 0; i < data.length; i += 4) if (data[i + 3] > 100) { r += data[i]; g += data[i + 1]; b += data[i + 2]; k++; }
+    d.color = k ? [r / k / 255, g / k / 255, b / k / 255] : [0.5, 0.5, 0.5];
   }
-  BLOCKS[B.water].mapColor = [59, 123, 216];
-  BLOCKS[B.air].mapColor = null;
+  // resolve drops and recipes to ids
+  for (const d of BLOCKS) d.dropId = d.drop ? B[d.drop] : -1;
+  for (const r of RECIPES) {
+    r.outId = B[r.out[0]]; r.outN = r.out[1];
+    r.ins = r.in.map(([k, n]) => ({ ids: GROUPS[k] ? GROUPS[k].map(g => B[g]) : [B[k]], n, label: GROUPS[k] ? 'Any planks' : BLOCKS[B[k]].name, key: k }));
+    if (r.outId === undefined || r.ins.some(i => i.ids.some(x => x === undefined))) throw new Error('Bad recipe ' + r.out[0]);
+  }
 }
 
-// Items the player can choose in the block picker (everything not hidden).
-function pickableItems() { return BLOCKS.filter(d => d.cat !== 'hidden'); }
+const isPlaceable = d => !d.item || !!d.places || !!d.bucket;
+function pickableItems() { return BLOCKS.filter(d => d.cat !== 'hidden' && d.id !== 0); }
+function isSoil(id, kind) {
+  const d = BLOCKS[id];
+  if (!d) return false;
+  if (kind === 'any') return d.solid && d.opaque;
+  return !!d.soil;
+}

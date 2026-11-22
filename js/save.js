@@ -1,12 +1,12 @@
 'use strict';
 // ---------------------------------------------------------------------------
-// Saving: the world is regenerated from its seed, then the saved blocks are
-// laid on top. Block arrays are run-length encoded to fit in localStorage.
+// Saving. A world is rebuilt from its seed, then every chunk the player has
+// changed is laid back on top. Chunks are run-length encoded, and a block
+// palette (id -> name) keeps old saves working when new blocks are added.
 // ---------------------------------------------------------------------------
 
 const Save = {
-  KEY: 'pixelrealms.save.v1',
-
+  key: mode => 'pr3d.save.' + mode,
   encode(arr) {
     const out = [];
     let i = 0;
@@ -23,8 +23,7 @@ const Save = {
     return btoa(s);
   },
   decode(b64, len) {
-    const s = atob(b64);
-    const arr = new Uint8Array(len);
+    const s = atob(b64), arr = new Uint8Array(len);
     let o = 0;
     for (let k = 0; k + 1 < s.length && o < len; k += 2) {
       const n = s.charCodeAt(k), v = s.charCodeAt(k + 1);
@@ -33,42 +32,38 @@ const Save = {
     }
     return arr;
   },
-
   write(game) {
-    const w = game.world;
-    // finish pending growth animations and restore crumbled platforms
-    for (const job of w.jobs) { job.acc = 1e9; }
-    w.jobStep(0);
-    w.restorePending();
-    const growing = [];
-    for (const [i, t] of w.growing) growing.push(i, Math.round(t * 10) / 10);
+    const w = game.world, p = game.player;
+    if (!w || game.mode === 'parkour') return false;
+    const chunks = {};
+    const put = (k, b, m) => { chunks[k] = [this.encode(b), this.encode(m)]; };
+    for (const [k, sv] of w.saved) put(k, sv.b, sv.m);
+    for (const [k, c] of w.chunks) if (c.modified) put(k, c.blocks, c.meta);
     const data = {
-      v: 1, seed: w.seedStr, savedAt: Date.now(),
-      fg: this.encode(w.fg), bg: this.encode(w.bg), meta: this.encode(w.meta),
-      growing,
-      player: { x: game.player.x, y: game.player.y, fly: game.player.fly },
-      spawnPoint: game.spawnPoint, time: game.time, day: game.day,
-      hotbar: game.hotbar.map(id => BLOCKS[id].key), sel: game.sel,
-      discovered: [...game.discovered],
+      v: 2, seed: w.seedStr, mode: game.mode, savedAt: Date.now(), time: game.time, day: game.day,
+      palette: BLOCKS.map(d => d.key),
+      player: { x: p.x, y: p.y, z: p.z, yaw: game.cam.yaw, pitch: game.cam.pitch, hp: game.hp, fly: !!p.fly },
+      spawn: game.spawnPoint, sel: game.sel, view: game.cam.view,
+      inv: game.inv.map(s => (s ? [s.id, s.n] : null)),
+      chunks,
     };
-    return Store.set(this.KEY, data);
+    return Store.set(this.key(game.mode), data);
   },
-  read() { return Store.get(this.KEY, null); },
-  info() {
-    const d = this.read();
-    return d && d.seed !== undefined ? { seed: d.seed, savedAt: d.savedAt, day: d.day } : null;
+  read(mode) { return Store.get(this.key(mode), null); },
+  info(mode) { const d = this.read(mode); return d && d.seed !== undefined ? { seed: d.seed, day: d.day || 1 } : null; },
+  // map saved ids to the current registry
+  remap(data) {
+    const map = new Uint8Array(256);
+    (data.palette || []).forEach((k, i) => { map[i] = B[k] !== undefined ? B[k] : 0; });
+    return map;
   },
-  apply(world, data) {
-    const n = world.W * world.H;
-    world.fg = this.decode(data.fg, n);
-    world.bg = this.decode(data.bg, n);
-    world.meta = this.decode(data.meta, n);
-    world.rebuildRegistries();
-    world.growing.clear();
-    for (let k = 0; k + 1 < data.growing.length; k += 2) {
-      const i = data.growing[k];
-      if (BLOCKS[world.fg[i]] && BLOCKS[world.fg[i]].plant) world.growing.set(i, data.growing[k + 1]);
+  restore(world, data) {
+    const map = this.remap(data), n = CS * CS * CH;
+    for (const [k, [b, m]] of Object.entries(data.chunks || {})) {
+      const blocks = this.decode(b, n);
+      for (let i = 0; i < n; i++) blocks[i] = map[blocks[i]];
+      world.saved.set(Number(k), { b: blocks, m: this.decode(m, n) });
     }
-    world.dirty = true;
+    return map;
   },
 };

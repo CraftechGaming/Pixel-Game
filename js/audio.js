@@ -65,7 +65,7 @@ const Sound = {
   play(name, o = {}) {
     if (!this.ctx || !this.enabled) return;
     const now = this.ctx.currentTime;
-    const gap = { step: 0.11, dig: 0.07, place: 0.04, grow: 0.08, talk: 0.5, honk: 1.5, chicken: 2, pig: 2, sheep: 2, pop: 0.05, splash: 0.2 }[name] || 0.02;
+    const gap = { whoosh: 0.15, countdown: 0.3, step: 0.11, dig: 0.07, place: 0.04, grow: 0.08, talk: 0.5, honk: 1.5, chicken: 2, pig: 2, sheep: 2, pop: 0.05, splash: 0.2 }[name] || 0.02;
     if (this.last[name] && now - this.last[name] < gap) return;
     this.last[name] = now;
     const mat = o.block !== undefined && BLOCKS[o.block] ? BLOCKS[o.block].sound : 'stone';
@@ -103,6 +103,13 @@ const Sound = {
       case 'hurt': this.tone(240, 0.2, { slide: -120, vol: 0.1 }); break;
       case 'sleep': [660, 523, 392].forEach((f, i) => this.tone(f, 0.5, { type: 'sine', delay: i * 0.3, vol: 0.07, attack: 0.05 })); break;
       case 'error': this.tone(200, 0.08, { vol: 0.06 }); this.tone(170, 0.1, { vol: 0.06, delay: 0.1 }); break;
+      case 'whoosh': this.noise(0.35, { filter: 'bandpass', freq: 600, slide: 1400, vol: 0.18, q: 0.7 }); this.tone(500, 0.2, { type: 'sine', slide: -300, vol: 0.06 }); break;
+      case 'countdown': this.tone(523, 0.18, { type: 'square', vol: 0.08 }); break;
+      case 'go': [784, 1046].forEach((f, i) => this.tone(f, 0.3, { type: 'square', vol: 0.08, delay: i * 0.08 })); break;
+      case 'qualify': [523, 659, 784, 1046, 1318].forEach((f, i) => this.tone(f, 0.25, { delay: i * 0.09, vol: 0.08 })); [523, 659, 784].forEach(f => this.tone(f, 1.4, { type: 'triangle', delay: 0.5, vol: 0.06, attack: 0.03 })); break;
+      case 'eliminated': [392, 330, 262].forEach((f, i) => this.tone(f, 0.35, { type: 'triangle', delay: i * 0.22, vol: 0.09 })); break;
+      case 'eat': for (let i = 0; i < 3; i++) this.noise(0.07, { freq: 900, vol: 0.12, delay: i * 0.12 }); break;
+      case 'craft': this.tone(330, 0.08, { type: 'triangle', vol: 0.1 }); this.tone(494, 0.12, { type: 'triangle', vol: 0.1, delay: 0.07 }); this.noise(0.08, { freq: 1200, vol: 0.08 }); break;
       case 'discover': [392, 523, 659, 784].forEach((f, i) => this.tone(f, 0.9, { type: 'triangle', delay: i * 0.16, vol: 0.06, attack: 0.04 })); break;
       default: break;
     }

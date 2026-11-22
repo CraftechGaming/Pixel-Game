@@ -1,113 +1,98 @@
 # Pixel Realms
 
-A 2D pixel-art sandbox you play in the browser. Build homes block by block, grow
-anything from seeds, and explore a seeded world with villages, a city, water,
-caves and nine parkour courses. The world opens with a cinematic fly-through.
+A 3D block game you play in the browser. Pick the kind of world you want:
 
-Everything is drawn and synthesised in code: there are no image or audio files.
+- **Survival**: mine blocks to collect them, craft tools, and build a home. Watch your hearts.
+- **Creative**: every block, flying, and instant building.
+- **Parkour**: a party race against eleven rivals through wobbly obstacle courses.
+
+Everything (the 3D engine, textures, characters and sounds) is made in code. There are no image or audio files and no libraries.
 
 ## Play
 
-Open `index.html` in a modern browser. No install, build step or server needed.
+Open `index.html` in a recent browser (it needs WebGL 2). No install, build step or server.
 
-To get a single file you can send to someone or keep offline:
+To get one self-contained file you can share or keep offline:
 
 ```sh
 node tools/bundle.js        # writes dist/pixel-realms.html
 ```
 
-The game also works as-is on GitHub Pages or any static host.
+## Survival
 
-## What's in a world
+- Hold left click (or the pickaxe button on touch) to mine. The block pops out and you pick it up.
+- Start by mining a tree. Open **Inventory** (`E`) to turn logs into planks and sticks, then make a pickaxe.
+- Tools come in wood, stone, iron and gem. Stone needs a pickaxe, iron ore needs a stone pickaxe, and gold and gems need iron.
+- Cook ore, sand and clay with coal to get ingots, glass and bricks.
+- You have 10 hearts. Falling too far, lava, cactus and running out of air hurt. Hearts come back slowly, faster if you eat apples or bread.
+- Sleep in a bed to skip the night and set your spawn point.
 
-- **Seeds.** Type any word or number on the title screen. The same seed always
-  builds the same world, so you can share a seed with friends.
-- **Villages.** Two villages with houses, a well, farms, a market stall, a
-  chapel, lamp posts and villagers who chat with you. Building styles follow the
-  biome (oak, birch, pine, cherry or desert sandstone).
-- **City.** Towers with lit windows, ladders up to every roof, street lamps,
-  cars driving through, a park with a fountain and a skyline in the distance.
-- **Water.** Water flows downhill and spreads out. Oceans sit at both ends of
-  the world and lakes appear in between. Water Springs make endless water and
-  Sponges soak it up.
-- **Nine parkour courses**, each a different kind of challenge:
+There are about 60 recipes: tools, torches, doors, ladders, fences, beds, chests, lanterns, dyed cloth, roofs, bricks, a **House Seed** that grows a whole cottage, and a **Wonder Seed** that grows a surprise.
 
-  | Course | Challenge |
-  | --- | --- |
-  | Meadow Hops | Floating platforms, a warm-up near spawn |
-  | Frost Run | Slippery ice |
-  | Lava Leap | Basalt pillars over a lava pit |
-  | Bounce Castle | Bounce pads launch you to high ledges |
-  | Crumble Sky | Platforms fall away after you land |
-  | Ladder Tower | A 46-block climb of ladders, ledges and pads |
-  | Speed Way | Speed pads fling you over long gaps |
-  | Cloud Walk | A tall ladder, then a walk across the clouds |
-  | Rooftop Rush | Jumping between city rooftops |
+## Creative
 
-  Courses keep your best time per seed. Every generated jump is checked to be
-  possible with the game's physics.
-- **Biomes:** plains, forest, desert, snowy tundra, mountains, cherry grove,
-  beaches and oceans, plus caves with ores, crystals and deep lava.
-- **Day, night and weather.** A ten-minute day with sunrise and sunset, stars,
-  rain and snow, fireflies at night and chimney smoke in the villages.
+Every block is available from **Blocks** (`E`). Press `F` to fly, `Space` to rise and `Shift` to sink. Blocks break in one click.
 
-## Grow anything
+## The world
 
-Plant seeds on grass, dirt or farmland. Plants grow faster near water, on
-farmland and in the rain. Use Fertilizer to grow a plant right away.
+Each seed makes the same infinite world every time:
 
-| Seed | Grows into |
+- Plains, forest, cherry grove, desert, snowy tundra, mountains, beaches and oceans
+- Caves with coal, iron, gold and gem ores, and lava deep down
+- Villages with houses, a well, farms, lamp posts and villagers who give tips
+- A city of towers with lit windows, ladders to every roof, street lamps and little parks
+- Flowing water, a day and night cycle with sunrises, stars and clouds, and animals
+
+## Parkour
+
+Race eleven bots across courses floating in the sky. Jump the spinning sweepers, dodge the swinging hammers and side pushers, ride moving platforms, run up conveyor belts, bounce on pads and cross crumbling tiles. Falling off sends you back to the last checkpoint.
+
+| Course | What's in it |
 | --- | --- |
-| Wheat, carrot, corn, tomato, berries | Crops with several growth stages |
-| Pumpkin, melon | A pumpkin or melon block |
-| Rose, tulip, daisy, bluebell, sunflower | Flowers |
-| Oak, birch, pine, cherry, palm saplings | Full trees, with a growth animation |
-| Sugar cane, bamboo, cactus | Taller and taller stalks |
-| Mushroom | A giant mushroom |
-| House Seed | A whole cottage with furniture |
-| Tower Seed | A lookout tower |
-| Wonder Seed | A surprise: rainbow tree, crystal spire, giant sunflower, fountain and more |
+| Block Rush | Stepping stones, a sweeper, a bounce climb and crumbling tiles |
+| Hammer Hall | Swinging hammers and side pushers |
+| Conveyor Chaos | Conveyor belts, moving platforms and a double sweeper |
+| Tumble Tower | Stairs and bounce pads up into the sky |
+| Lucky Mix | A new random course every time |
+
+The **Knockout Cup** is three rounds: the top 8 of 12 go through, then the top 4, then the first across the line in the final wins the crown.
 
 ## Controls
 
 | Keyboard and mouse | Action |
 | --- | --- |
-| `A` `D` | Walk |
-| `Space` / `W` | Jump (W also climbs ladders and swims up) |
-| `S` | Climb down, drop through platforms |
-| `Shift` | Run |
-| Left click | Dig |
-| Right click | Place a block, sleep in a bed, light a Boom Block |
-| `1`–`9`, mouse wheel | Choose a hotbar slot |
-| `E` | All blocks and items |
-| `M` | World map and travel |
-| `F` | Fly |
-| `Tab` | Back wall mode (build walls behind you) |
+| `W` `A` `S` `D` | Move |
+| Mouse | Look (click the game first) |
+| `Space` | Jump, swim up, climb ladders |
+| `Shift` | Run (fly down in Creative) |
+| Left click | Hold to mine |
+| Right click | Place a block, eat, open a door, sleep |
+| `1`–`9`, wheel | Choose a hotbar slot |
+| `E` | Inventory and crafting (all blocks in Creative) |
+| `F` | Fly (Creative) |
+| `V` | First or third person |
 | `C` | Cinematic camera |
-| `R` | Back to the last parkour checkpoint |
-| `+` `-` | Zoom |
+| `R` | Back to the last checkpoint (Parkour) |
 | `Esc` | Menu |
 
-On phones and tablets, on-screen buttons handle walking and jumping, and a
-Dig / Build button sets what tapping the world does.
+On phones and tablets: drag on the left side to walk, drag on the right to look, tap to place, hold to mine, and use the jump button.
 
-Your world saves in the browser automatically every minute and when you open the
-menu. Choose **Continue** on the title screen to pick up where you left off.
+Survival and Creative worlds save in your browser every minute and when you open the menu. Choose **Continue** to pick up where you left off.
 
 ## Project layout
 
 | File | Purpose |
 | --- | --- |
-| `js/util.js` | Math, seeded random numbers, noise, colours, storage |
-| `js/blocks.js` | Block list and the procedural pixel-art textures |
-| `js/world.js` | Block storage, water flow, plant growth, lighting |
-| `js/worldgen.js` | Terrain, biomes, caves, lakes and where everything goes |
-| `js/structures.js` | Trees, houses, villages, city towers, parkour courses |
-| `js/entities.js` | Physics, the player, villagers, animals, cars |
-| `js/particles.js` | Dust, splashes, sparkles, smoke, fireworks |
-| `js/render.js` | Sky, parallax, blocks, water, light and weather |
-| `js/cinematic.js` | Intro fly-through, title cards, letterbox and fades |
-| `js/parkour.js` | Flags, timer, checkpoints and best times |
+| `js/util.js`, `js/math3d.js` | Math, seeded randomness, noise, matrices |
+| `js/blocks.js` | Blocks, items, tools, recipes and the procedural textures |
+| `js/world.js` | Chunks, block access, water flow, plant growth, timed blocks |
+| `js/terrain.js` | Terrain, biomes, caves, ores, trees, villages and the city |
+| `js/mesher.js` | Chunk meshes with smooth light, torch light and shading |
+| `js/gl.js` | WebGL 2 renderer: chunks, sky, clouds, water, models |
+| `js/entities.js` | Physics, the bean characters, animals, item drops, particles |
+| `js/parkour.js` | Obstacles, course builder, racer bots and race rules |
+| `js/input.js` | Keyboard, mouse look and touch controls |
+| `js/ui.js`, `css/style.css` | Title screen, HUD, inventory, crafting, menus |
+| `js/save.js` | Saving and loading worlds |
 | `js/audio.js` | Synthesised sound effects and music |
-| `js/ui.js`, `css/style.css` | HUD, hotbar, block picker, map and menus |
-| `js/main.js` | Game loop and how everything fits together |
+| `js/main.js` | Game loop, modes, camera, mining and building |
