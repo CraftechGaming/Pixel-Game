@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Pixel Realms</title>
+<meta name="description" content="A 2D pixel sandbox: build homes, grow anything, explore villages, a city and parkour courses. Every world comes from a seed.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Pixelify+Sans:wght@400;500;600;700&family=VT323&display=swap">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<!--BODY-START-->
+<canvas id="game" aria-label="Game world"></canvas>
+
+<div id="cine-bars" aria-hidden="true"><div class="bar top"></div><div class="bar bottom"></div></div>
+
+<div id="hud" hidden>
+  <div class="hud-top">
+    <div class="chips">
+      <div class="chip" id="chip-time"><img class="pix" id="time-icon" alt=""><span id="time-text">06:00</span><span class="chip-dim" id="day-text">Day 1</span></div>
+      <div class="chip" id="chip-loc"><img class="pix" id="loc-icon" alt=""><span id="loc-text">Plains</span></div>
+    </div>
+    <div class="hud-buttons">
+      <button class="hbtn" id="btn-blocks" title="All blocks and items (E)"><img class="pix" data-icon="ui_bag" alt=""><span class="lbl">Blocks</span><kbd>E</kbd></button>
+      <button class="hbtn" id="btn-map" title="World map and travel (M)"><img class="pix" data-icon="ui_map" alt=""><span class="lbl">Map</span><kbd>M</kbd></button>
+      <button class="hbtn" id="btn-menu" title="Menu (Esc)"><img class="pix" data-icon="ui_menu" alt=""><span class="lbl">Menu</span><kbd>Esc</kbd></button>
+    </div>
+  </div>
+  <div id="parkour-hud" hidden>
+    <div class="pk-name"></div>
+    <div class="pk-time">00:00.00</div>
+    <div class="pk-info"></div>
+  </div>
+  <div id="toasts" aria-live="polite"></div>
+  <div class="hud-bottom">
+    <div id="item-label"></div>
+    <div class="toggles">
+      <button class="toggle touch-only" id="tg-mode" aria-pressed="false"><img class="pix" data-icon="ui_pick" alt=""><span>Dig</span></button>
+      <button class="toggle" id="tg-fly" aria-pressed="false" title="Fly (F)"><img class="pix" data-icon="ui_wing" alt=""><span>Fly</span><kbd>F</kbd></button>
+      <button class="toggle" id="tg-wall" aria-pressed="false" title="Build back walls (Tab)"><img class="pix" data-icon="ui_wall" alt=""><span>Back wall</span><kbd>Tab</kbd></button>
+    </div>
+    <div id="hotbar" role="toolbar" aria-label="Hotbar"></div>
+  </div>
+  <div id="touch-controls" hidden>
+    <div class="tc-group left"><button class="tc" id="tc-left" aria-label="Walk left">◀</button><button class="tc" id="tc-right" aria-label="Walk right">▶</button></div>
+    <div class="tc-group right"><button class="tc" id="tc-down" aria-label="Down">▼</button><button class="tc big" id="tc-jump" aria-label="Jump">▲</button></div>
+  </div>
+</div>
+
+<div id="cine-title" aria-live="polite"><div class="cine-main"></div><div class="cine-sub"></div></div>
+<div id="zone-title" aria-live="polite"><div class="zone-main"></div><div class="zone-sub"></div></div>
+
+<div id="overlay" hidden></div>
+
+<section id="panel-inv" class="panel" hidden aria-labelledby="inv-title">
+  <header>
+    <h2 id="inv-title">Blocks &amp; Items</h2>
+    <input id="inv-search" type="search" placeholder="Search…" autocomplete="off" aria-label="Search blocks">
+    <button class="close" data-close aria-label="Close">✕</button>
+  </header>
+  <nav id="inv-tabs" aria-label="Categories"></nav>
+  <div id="inv-grid"></div>
+  <footer>Pick an item to put it in the highlighted hotbar slot. Click a hotbar slot first to choose which slot.</footer>
+</section>
+
+<section id="panel-map" class="panel wide" hidden aria-labelledby="map-title">
+  <header><h2 id="map-title">World Map</h2><button class="close" data-close aria-label="Close">✕</button></header>
+  <div id="map-scroll"><div id="map-inner"><canvas id="map-canvas"></canvas><div id="map-markers"></div></div></div>
+  <div id="map-list"></div>
+  <footer>Choose a place to travel there, or tap anywhere on the map.</footer>
+</section>
+
+<section id="panel-pause" class="panel narrow" hidden aria-labelledby="pause-title">
+  <header><h2 id="pause-title">Paused</h2></header>
+  <div class="menu-list">
+    <button class="btn primary" id="pm-resume">Resume</button>
+    <button class="btn" id="pm-save">Save world</button>
+    <button class="btn" id="pm-cine">Cinematic camera <kbd>C</kbd></button>
+    <div class="row"><button class="btn" id="pm-sound">Sound: on</button><button class="btn" id="pm-music">Music: on</button></div>
+    <div class="row"><button class="btn" id="pm-zoomout">Zoom out</button><button class="btn" id="pm-zoomin">Zoom in</button></div>
+    <button class="btn" id="pm-help">How to play</button>
+    <div class="seed-box"><span>Seed</span><code id="pm-seed"></code><button class="btn small" id="pm-copy">Copy</button></div>
+    <button class="btn ghost" id="pm-quit">Save and quit to title</button>
+  </div>
+</section>
+
+<section id="panel-help" class="panel" hidden aria-labelledby="help-title">
+  <header><h2 id="help-title">How to play</h2><button class="close" data-close aria-label="Close">✕</button></header>
+  <div class="help-body">
+    <div class="help-col">
+      <h3>Keyboard &amp; mouse</h3>
+      <dl class="keys">
+        <dt><kbd>A</kbd><kbd>D</kbd></dt><dd>Walk left and right</dd>
+        <dt><kbd>Space</kbd></dt><dd>Jump. <kbd>W</kbd> also climbs ladders and swims up</dd>
+        <dt><kbd>S</kbd></dt><dd>Climb down, drop through platforms</dd>
+        <dt><kbd>Shift</kbd></dt><dd>Run</dd>
+        <dt>Left click</dt><dd>Dig or break a block</dd>
+        <dt>Right click</dt><dd>Place a block, use a bed, light a Boom Block</dd>
+        <dt><kbd>1</kbd>–<kbd>9</kbd> / wheel</dt><dd>Choose a hotbar slot</dd>
+        <dt><kbd>E</kbd></dt><dd>All blocks and items</dd>
+        <dt><kbd>M</kbd></dt><dd>World map and travel</dd>
+        <dt><kbd>F</kbd></dt><dd>Fly on or off</dd>
+        <dt><kbd>Tab</kbd></dt><dd>Back wall mode: build walls behind you</dd>
+        <dt><kbd>C</kbd></dt><dd>Cinematic camera</dd>
+        <dt><kbd>R</kbd></dt><dd>Back to the last checkpoint</dd>
+        <dt><kbd>+</kbd><kbd>−</kbd></dt><dd>Zoom</dd>
+      </dl>
+    </div>
+    <div class="help-col">
+      <h3>Touch</h3>
+      <p>Use <b>◀ ▶</b> to walk, <b>▲</b> to jump and <b>▼</b> to go down. The <b>Dig / Build</b> button chooses what happens when you tap the world. Hold to keep digging.</p>
+      <h3>Grow anything</h3>
+      <p>Plant seeds on grass, dirt or farmland. Plants grow faster near water, on farmland and in the rain. Use <b>Fertilizer</b> on a plant to grow it right away.</p>
+      <p>A <b>House Seed</b> grows a whole cottage. A <b>Tower Seed</b> grows a lookout tower. A <b>Wonder Seed</b> grows a surprise.</p>
+      <h3>Water</h3>
+      <p>Water flows downhill and spreads out. A <b>Water Spring</b> makes endless water and a <b>Sponge</b> soaks it up.</p>
+      <h3>Parkour</h3>
+      <p>Touch a green <b>Start</b> flag, reach the blue <b>Checkpoints</b> and finish at the checkered flag. Build your own course with Bounce Pads, Speed Pads and Crumble Blocks.</p>
+    </div>
+  </div>
+</section>
+
+<button id="skip-btn" hidden>Skip intro ▸</button>
+<div id="fade"></div>
+
+<div id="title-screen">
+  <div class="title-card">
+    <div class="title-brand">
+      <h1 class="logo"><span class="logo-a">Pixel</span><span class="logo-b">Realms</span></h1>
+      <p class="tagline">Build homes, grow anything, and explore villages, a city and nine parkour courses.</p>
+    </div>
+    <div class="title-form">
+    <label class="field-label" for="seed-input">World seed</label>
+    <div class="seed-row">
+      <input id="seed-input" maxlength="24" autocomplete="off" spellcheck="false">
+      <button class="btn icon" id="seed-random" title="New random seed" aria-label="New random seed"><img class="pix" data-icon="ui_dice" alt=""></button>
+    </div>
+    <p class="seed-hint">The same seed always makes the same world. Share yours with friends.</p>
+    <div class="title-actions">
+      <button class="btn primary big" id="btn-new">Create world</button>
+      <button class="btn" id="btn-continue" hidden>Continue</button>
+      <button class="btn ghost" id="btn-howto">How to play</button>
+    </div>
+    </div>
+  </div>
+</div>
+
+<div id="loading" hidden><div class="load-text">Shaping the world…</div><div class="load-bar"><span></span></div></div>
+<!--BODY-END-->
+<script src="js/util.js"></script>
+<script src="js/blocks.js"></script>
+<script src="js/world.js"></script>
+<script src="js/structures.js"></script>
+<script src="js/worldgen.js"></script>
+<script src="js/entities.js"></script>
+<script src="js/particles.js"></script>
+<script src="js/audio.js"></script>
+<script src="js/render.js"></script>
+<script src="js/parkour.js"></script>
+<script src="js/cinematic.js"></script>
+<script src="js/input.js"></script>
+<script src="js/save.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>
